@@ -13,19 +13,24 @@ import numpy as np
 import torch
 
 
-ROOT = Path(__file__).resolve().parent
-SOURCE = Path(
+ROOT = Path(os.environ.get("DVP_RUN_ROOT", Path(__file__).resolve().parent))
+SOURCE = Path(os.environ.get(
+    "DVP_SOURCE",
     "/mnt/nuplan/l3data-reconstruction-bingxing/samples/"
-    "sample_00001_clip_M18-2_07_20251202093910_DF_f76_176_left/converted"
-)
-OPENMVS_MASKS = Path(
+    "sample_00001_clip_M18-2_07_20251202093910_DF_f76_176_left/converted",
+))
+OPENMVS_MASKS = Path(os.environ.get(
+    "DVP_OPENMVS_MASKS",
     "/mnt/nuplan/l3data-reconstruction-bingxing/tem-test/colmap+openmvs/"
     "batch8_first8_roadmesh/results/"
     "sample_00001_clip_M18-2_07_20251202093910_DF_f76_176_left/"
-    "01_masks/openmvs_masks"
-)
+    "01_masks/openmvs_masks",
+))
 SCENE = ROOT / "scene"
-WEIGHTS = Path("/mnt/zhoukaixuan_workspace/code/weights/moge-3-vitl/model.pt")
+WEIGHTS = Path(os.environ.get(
+    "DVP_MOGE_WEIGHTS",
+    "/mnt/zhoukaixuan_workspace/code/weights/moge-3-vitl/model.pt",
+))
 WIDTH, HEIGHT = 960, 640
 
 

@@ -13,18 +13,20 @@ import cv2
 import numpy as np
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(os.environ.get("DVP_RUN_ROOT", Path(__file__).resolve().parent))
 SCENE = ROOT / "scene"
-SOURCE = Path(
+SOURCE = Path(os.environ.get(
+    "DVP_SOURCE",
     "/mnt/nuplan/l3data-reconstruction-bingxing/samples/"
-    "sample_00001_clip_M18-2_07_20251202093910_DF_f76_176_left/converted"
-)
-NEIGHBORS_TSV = Path(
+    "sample_00001_clip_M18-2_07_20251202093910_DF_f76_176_left/converted",
+))
+NEIGHBORS_TSV = Path(os.environ.get(
+    "DVP_NEIGHBORS_TSV",
     "/mnt/nuplan/l3data-reconstruction-bingxing/tem-test/colmap+openmvs/"
     "batch8_first8_roadmesh/results/"
     "sample_00001_clip_M18-2_07_20251202093910_DF_f76_176_left/"
-    "00_audit/neighbors_diverse_pm20_top20.tsv"
-)
+    "00_audit/neighbors_diverse_pm20_top20.tsv",
+))
 WIDTH, HEIGHT = 960, 640
 DEPTH_MIN, DEPTH_MAX = 0.5, 80.0
 MIN_PRIOR_COMPONENT = 20

@@ -1,5 +1,6 @@
 /build/
 /build-original/
+/clip_runs/
 __pycache__/
 
 # Runtime logs and generated binary artifacts
