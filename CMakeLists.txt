@@ -6,7 +6,7 @@ set(Boost_USE_MULTITHREADED ON)
 set(Boost_USE_STATIC_RUNTIME OFF)
 
 # recommand >=3.3.0
-set(OpenCV_DIR "E:/opencv-4.2.0/opencv/build")
+# OpenCV is discovered from the system or -DOpenCV_DIR.
 find_package(OpenCV REQUIRED)
 # recommand >=1.62.0
 find_package(Boost REQUIRED COMPONENTS filesystem system)

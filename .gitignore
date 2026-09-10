@@ -1,0 +1,33 @@
+/build/
+/build-original/
+__pycache__/
+
+# Runtime logs and generated binary artifacts
+*.log
+*.exit
+*.dmb
+*.bin
+*.exr
+*.npz
+*.ply
+*.mvs
+*.mlp
+*.glb
+
+# Local diagnostics, reports, and benchmark outputs
+/diagnostics/
+/MOGE_OUTPUTS.md
+/RUN_REPORT.zh-CN.md
+/moge3_example_tests/
+
+# Generated experiment inputs and outputs. Keep the scripts/configuration in
+# each experiment directory under version control.
+/moge3_*/scene*/
+/moge3_*/results/
+/moge3_*/inputs/
+/moge3_*/openmvs_fusion/dmaps/
+/moge3_*/*.jpg
+/moge3_*/*.png
+/moge3_*/*.json
+/moge3_*/**/*.json
+/moge3_sample_00001/exit-code.txt

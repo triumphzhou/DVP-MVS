@@ -1,5 +1,6 @@
 ﻿#include "main.h"
 #include "APD.h"
+#include <thread>
 
 using namespace boost::filesystem;
 
@@ -132,11 +133,12 @@ void GenerateSampleList(const path& dense_folder, std::vector<Problem>& problems
 	std::stringstream iss;
 	std::string line;
 
-	int num_images;
+	int num_images = 0;
+	if (!file) throw std::runtime_error("Cannot open pair.txt");
 	iss.clear();
 	std::getline(file, line);
 	iss.str(line);
-	iss >> num_images;
+	if (!(iss >> num_images) || num_images <= 0) throw std::runtime_error("Invalid pair.txt image count");
 
 	for (int i = 0; i < num_images; ++i) {
 		Problem problem;
@@ -151,20 +153,21 @@ void GenerateSampleList(const path& dense_folder, std::vector<Problem>& problems
 		problem.result_folder = dense_folder / path("APD") / path(ToFormatIndex(problem.ref_image_id));
 		create_directory(problem.result_folder);
 
-		int num_src_images;
+		int num_src_images = 0;
 		iss.clear();
 		std::getline(file, line);
 		iss.str(line);
-		iss >> num_src_images;
+		if (!(iss >> num_src_images) || num_src_images < 1 || num_src_images >= MAX_IMAGES) throw std::runtime_error("pair.txt requires 1..31 source views");
 		for (int j = 0; j < num_src_images; ++j) {
 			int id;
 			float score;
-			iss >> id >> score;
+			if (!(iss >> id >> score)) throw std::runtime_error("Malformed pair.txt source view");
 			if (score <= 0.0f) {
 				continue;
 			}
 			problem.src_image_ids.push_back(id);
 		}
+		if (problem.src_image_ids.empty()) throw std::runtime_error("No positive-score source views");
 		problems.push_back(problem);
 	}
 }
@@ -420,7 +423,7 @@ void ProcessProblem(const Problem& problem) {
 
 int main(int argc, char** argv) {
 	if (argc < 2) {
-		std::cerr << "USAGE: APD dense_folder\n";
+		std::cerr << "USAGE: APD dense_folder [gpu_index [worker_index worker_count]]\n";
 		return EXIT_FAILURE;
 	}
 	path dense_folder(argv[1]);
@@ -431,23 +434,61 @@ int main(int argc, char** argv) {
 	if (argc == 3) {
 		gpu_index = std::atoi(argv[2]);
 	}
-	cudaSetDevice(gpu_index);
+	if (argc >= 3) gpu_index = std::atoi(argv[2]);
+	int worker_index = 0;
+	int worker_count = 1;
+	if (argc == 5) {
+		worker_index = std::atoi(argv[3]);
+		worker_count = std::atoi(argv[4]);
+		if (worker_count < 1 || worker_index < 0 || worker_index >= worker_count) {
+			std::cerr << "Invalid worker index/count\n";
+			return EXIT_FAILURE;
+		}
+	} else if (argc != 2 && argc != 3) {
+		std::cerr << "USAGE: APD dense_folder [gpu_index [worker_index worker_count]]\n";
+		return EXIT_FAILURE;
+	}
+	CUDA_SAFE_CALL(cudaSetDevice(gpu_index));
 	// generate problems
+	std::vector<Problem> all_problems;
+	GenerateSampleList(dense_folder, all_problems);
+	if (!CheckImages(all_problems)) {
+		std::cerr << "Missing images or inconsistent image sizes\n";
+		return EXIT_FAILURE;
+	}
 	std::vector<Problem> problems;
-	GenerateSampleList(dense_folder, problems);
-	//if (!CheckImages(problems)) {
-	//	std::cerr << "Images may error, check it!\n";
-	//	return EXIT_FAILURE;
-	//}
-	int num_images = problems.size();
-	std::cout << "There are " << num_images << " problems needed to be processed!" << std::endl;
+	for (const Problem& problem : all_problems) {
+		if (problem.index % worker_count == worker_index) problems.push_back(problem);
+	}
+	std::cout << "Worker " << worker_index << "/" << worker_count << " on GPU " << gpu_index
+		<< " processes " << problems.size() << " of " << all_problems.size() << " problems" << std::endl;
 
-	int round_num = ComputeRoundNum(problems);
+	int round_num = ComputeRoundNum(all_problems);
+	path barrier_folder = dense_folder / path("APD_parallel_barrier");
+	if (worker_count > 1) create_directories(barrier_folder);
+	auto barrier = [&](int iteration) {
+		if (worker_count == 1) return;
+		const std::string prefix = "iteration_" + std::to_string(iteration) + "_worker_";
+		const path marker = barrier_folder / path(prefix + std::to_string(worker_index) + ".done");
+		{
+			std::ofstream out(marker.string());
+			out << "done\n";
+		}
+		while (true) {
+			int ready = 0;
+			for (directory_iterator it(barrier_folder), end; it != end; ++it) {
+				if (is_regular_file(it->path()) && it->path().filename().string().find(prefix) == 0) ++ready;
+			}
+			if (ready >= worker_count) break;
+			std::this_thread::sleep_for(std::chrono::seconds(1));
+		}
+		std::cout << "Worker barrier completed for iteration " << iteration << std::endl;
+	};
 
 	std::cout << "Round nums: " << round_num << std::endl;
 	int iteration_index = 0;
 	bool flag = true;
-	for (int i = 0; i < round_num - 1; ++i) {
+	for (int i = 0; i < round_num; ++i) {
 		/*if(params->)*/
 		for (auto& problem : problems) {
 			problem.iteration = iteration_index;
@@ -481,6 +522,7 @@ int main(int argc, char** argv) {
 				ProcessProblem(problem);
 			}
 		}
+		barrier(iteration_index);
 		iteration_index++;
 		for (int j = 0; j < 3; ++j) {
 			for (auto& problem : problems) {
@@ -506,12 +548,13 @@ int main(int argc, char** argv) {
 					ProcessProblem(problem);
 				}
 			}
+			barrier(iteration_index);
 			iteration_index++;
 		}
 		std::cout << "Round: " << i << " done\n";
 	}
 
-	RunFusion(dense_folder, problems);
+	if (worker_index == 0) RunFusion(dense_folder, all_problems);
 	// {// delete files
 	// 	for (size_t i = 0; i < problems.size(); ++i) {
 	// 		const auto &problem = problems[i];

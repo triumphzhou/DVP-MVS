@@ -97,6 +97,7 @@ struct PatchMatchParams {
 	int weak_radius = 5;
 	int weak_increment = 5;
 	bool use_APD = true;
+	bool use_mono_prior = false;
 	//=====================================================
 	bool use_edge = true;		// ǿ���صĸ���Ұ��չ��������
 	bool use_limit = true;  	// ���������ǹ��ɵı�Ե����

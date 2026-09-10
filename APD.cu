@@ -508,13 +508,13 @@ __device__ float4 GenerateRandomNormal_YZL(DataPassHelper* helper, const Camera 
 	int center = p.y * width + p.x;
 	unsigned int* selected_views = helper->selected_views_cuda;
 	PatchMatchParams* params = helper->params;
-	float4 view_direction[20] = { 0 };
+	float4 view_direction[MAX_IMAGES] = { 0 };
 	view_direction[0] = GetViewDirection(camera, p, depth);
 	int index = 1;
 	for (int src_idx = 1; src_idx < helper->params->num_images; ++src_idx) {
 		const Camera ref_camera = helper->cameras_cuda[0];
 		const Camera src_camera = helper->cameras_cuda[src_idx];
-		const cudaTextureObject_t depth_image = helper->texture_depths_cuda[0].images[src_idx];
+		const cudaTextureObject_t depth_image = helper->params->geom_consistency ? helper->texture_depths_cuda[0].images[src_idx] : 0;
 		if (isSet(selected_views[center], src_idx - 1) == 1) {
 			float3 forward_point = Get3DPointonWorld_cu(p.x, p.y, depth, ref_camera);
 
@@ -523,7 +523,7 @@ __device__ float4 GenerateRandomNormal_YZL(DataPassHelper* helper, const Camera 
 			ProjectonCamera_cu(forward_point, src_camera, src_pt, src_d);
 
 			int2 src_pt_int = make_int2((int)src_pt.x + 0.5f, (int)src_pt.y + 0.5f);
-			float src_depth;
+			float src_depth = 1.0f;
 
 			if (params->geom_consistency) {
 				if (src_pt_int.x >= 0 && src_pt_int.x < width && src_pt_int.y >= 0 && src_pt_int.y < height)
@@ -540,7 +540,7 @@ __device__ float4 GenerateRandomNormal_YZL(DataPassHelper* helper, const Camera 
 			float R_t[9], R_c[9], R_f[3];
 			matTranspose3x3(cameras[src_idx].R, R_t);
 			matMul3x3(cameras[0].R, R_t, R_c);
-			float dir[3] = { direction.x, direction.y, direction.x };
+			float dir[3] = { direction.x, direction.y, direction.z };
 			matMul3x1(R_c, dir, R_f);
 			float norm = sqrt(R_f[0] * R_f[0] + R_f[1] * R_f[1] + R_f[2] * R_f[2]);
 			float4 view_direction_this;
@@ -937,8 +937,8 @@ __device__ float ComputeBilateralNCCNew(
 						int i = 0;
 						int j = 0;
 						if (k != 8) {
-							i = candidate[nei_center * LAB_BOUNDARY_NUM * NUM_IMAGES + (src_idx - 1) * LAB_BOUNDARY_NUM + k].x;
-							j = candidate[nei_center * LAB_BOUNDARY_NUM * NUM_IMAGES + (src_idx - 1) * LAB_BOUNDARY_NUM + k].y;
+							i = candidate[nei_center * LAB_BOUNDARY_NUM * (helper->params->num_images - 1) + (src_idx - 1) * LAB_BOUNDARY_NUM + k].x;
+							j = candidate[nei_center * LAB_BOUNDARY_NUM * (helper->params->num_images - 1) + (src_idx - 1) * LAB_BOUNDARY_NUM + k].y;
 						}
 						if (i == 0 && j == 0) {
 							if (k == 0) { i = -5; j = -5; }
@@ -1223,7 +1223,7 @@ __device__ float ComputeGeomConsistencyCost(
 ) {
 	const Camera ref_camera = helper->cameras_cuda[0];
 	const Camera src_camera = helper->cameras_cuda[src_idx];
-	const cudaTextureObject_t depth_image = helper->texture_depths_cuda[0].images[src_idx];
+	const cudaTextureObject_t depth_image = helper->params->geom_consistency ? helper->texture_depths_cuda[0].images[src_idx] : 0;
 
 	const float max_cost = 3.0f;
 
@@ -1287,11 +1287,12 @@ __global__ void RandomInitialization(
 	PatchMatchParams* params = helper->params;
 
 	if (params->state == FIRST_INIT) {
-		if (plane_hypotheses[center].w > params->depth_max || plane_hypotheses[center].w < params->depth_min)
+		if (!params->use_mono_prior || !isfinite(plane_hypotheses[center].w) || plane_hypotheses[center].w > params->depth_max || plane_hypotheses[center].w < params->depth_min)
 			plane_hypotheses[center] = GenerateRandomPlaneHypothesis_YZL(helper, cameras[0], p, &rand_states[center], params->depth_min, params->depth_max);
 		else {
-			/*plane_hypotheses_temp.w = plane_hypotheses[center].w;
-			plane_hypotheses[center] = plane_hypotheses_temp;*/
+			float4 plane = TransformNormal2RefCam(cameras[0], plane_hypotheses[center]);
+			plane.w = GetDistance2Origin(cameras[0], p, plane.w, plane);
+			plane_hypotheses[center] = plane;
 		}
 		//plane_hypotheses[center] = GenerateRandomPlaneHypothesis(cameras[0], p, &rand_states[center], params->depth_min, params->depth_max);
 
@@ -2457,6 +2458,9 @@ __device__ void CheckerboardPropagationStrong(
 			}
 			itertimes++;
 		}
+		for (int dir_index = 0; dir_index < 8; ++dir_index) {
+			positions[dir_index] = positions_tmp[dir_index];
+		}
 	}
 
 	// Multi-hypothesis Joint View Selection
@@ -2615,7 +2619,7 @@ __device__ void CheckerboardPropagationStrong(
 				int2 min_pt = make_int2(0, 0);
 				const Camera ref_camera = helper->cameras_cuda[0];
 				const Camera src_camera = helper->cameras_cuda[src_idx];
-				const cudaTextureObject_t depth_image = helper->texture_depths_cuda[0].images[src_idx];
+				const cudaTextureObject_t depth_image = helper->params->geom_consistency ? helper->texture_depths_cuda[0].images[src_idx] : 0;
 
 				int2 positive[Len];
 				int2 negative[Len];
@@ -2949,7 +2953,7 @@ __device__ void CheckerboardPropagationWeak(
 				int2 min_pt = make_int2(0, 0);
 				const Camera ref_camera = helper->cameras_cuda[0];
 				const Camera src_camera = helper->cameras_cuda[src_idx];
-				const cudaTextureObject_t depth_image = helper->texture_depths_cuda[0].images[src_idx];
+				const cudaTextureObject_t depth_image = helper->params->geom_consistency ? helper->texture_depths_cuda[0].images[src_idx] : 0;
 
 				int2 positive[Len];
 				int2 negative[Len];
@@ -3748,7 +3752,7 @@ __global__ void GenEdgeInform(
 		const cudaTextureObject_t ref_image = helper->texture_objects_cuda[0].images[0];
 
 		int radius = helper->params->weak_radius;
-		Point regions[12][20];
+		Point regions[12][20] = {};
 		int regionCounts[12] = { 0 }; // ÿ�������ڵĵ�������
 		int idx = 0;
 		const float ref_center_pix = tex2D<float>(ref_image, point.x + 0.5f, point.y + 0.5f);
@@ -3765,7 +3769,7 @@ __global__ void GenEdgeInform(
 						float weight = ComputeBilateralWeight_YZL(i, j, ref_pix, ref_center_pix, helper->params->sigma_spatial, helper->params->sigma_color);
 						Point p; p.i = i; p.j = j; p.angle = angle; p.weight = weight;
 						int region = getRegion(angle);
-						regions[region][regionCounts[region]++] = p;
+						if (region >= 0 && region < 12 && regionCounts[region] < 20) regions[region][regionCounts[region]++] = p;
 						idx++;
 					}
 					else {
@@ -3788,8 +3792,8 @@ __global__ void GenEdgeInform(
 
 		int ind = src_idx - 1;
 		for (int k = 0; k < LAB_BOUNDARY_NUM; k++) {
-			candidate[center * LAB_BOUNDARY_NUM * NUM_IMAGES + ind * LAB_BOUNDARY_NUM + k].x = min_regions[k].i;
-			candidate[center * LAB_BOUNDARY_NUM * NUM_IMAGES + ind * LAB_BOUNDARY_NUM + k].y = min_regions[k].j;
+			candidate[center * LAB_BOUNDARY_NUM * (helper->params->num_images - 1) + ind * LAB_BOUNDARY_NUM + k].x = min_regions[k].i;
+			candidate[center * LAB_BOUNDARY_NUM * (helper->params->num_images - 1) + ind * LAB_BOUNDARY_NUM + k].y = min_regions[k].j;
 		}
 	}
 
@@ -4329,6 +4333,9 @@ __global__ void RANSACToGetFitPlane(DataPassHelper* helper) {
 		if (temp_cost < min_cost) {
 			min_cost = temp_cost;
 			best_plane = cross_vec;
+			use_a_index = a_index;
+			use_b_index = b_index;
+			use_c_index = c_index;
 			has_best_plane = true;
 		}
 	}

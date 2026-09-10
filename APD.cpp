@@ -548,18 +548,18 @@ void ProjectCamera(const float3 PointX, const Camera camera, float2& point, floa
 bool ReadBinMat(const path& mat_path, cv::Mat& mat)
 {
 	ifstream in(mat_path, std::ios_base::binary);
-	if (in.bad()) {
+	if (!in) {
 		std::cerr << "Error opening file: " << mat_path << std::endl;
 		return false;
 	}
 
-	int version, rows, cols, type;
+	int version = 0, rows = 0, cols = 0, type = 0;
 	in.read((char*)(&version), sizeof(int));
 	in.read((char*)(&rows), sizeof(int));
 	in.read((char*)(&cols), sizeof(int));
 	in.read((char*)(&type), sizeof(int));
 
-	if (version != 1) {
+	if (!in || version != 1 || rows <= 0 || cols <= 0) {
 		in.close();
 		std::cerr << "Version error: " << mat_path << std::endl;
 		return false;
@@ -628,9 +628,10 @@ int writeNormalDmb(const path& mat_path, const cv::Mat_<cv::Vec3f> normal)
 }
 
 bool WriteBinMat(const path& mat_path, const cv::Mat& mat) {
-
-	ofstream out(mat_path, std::ios_base::binary);
-	if (out.bad()) {
+	// Readers from other GPU workers must never observe a partially-written map.
+	const path temp_path(mat_path.string() + ".tmp");
+	ofstream out(temp_path, std::ios_base::binary | std::ios_base::trunc);
+	if (!out) {
 		std::cout << "Error opening file: " << mat_path << std::endl;
 		return false;
 	}
@@ -645,13 +646,23 @@ bool WriteBinMat(const path& mat_path, const cv::Mat& mat) {
 	out.write((char*)&type, sizeof(int));
 	out.write((char*)mat.data, sizeof(char) * mat.step * mat.rows);
 	out.close();
+	if (!out) {
+		remove(temp_path);
+		std::cout << "Error writing file: " << mat_path << std::endl;
+		return false;
+	}
+	if (std::rename(temp_path.string().c_str(), mat_path.string().c_str()) != 0) {
+		remove(temp_path);
+		std::cout << "Error replacing file: " << mat_path << std::endl;
+		return false;
+	}
 	return true;
 }
 
 bool ReadCamera(const path& cam_path, Camera& cam)
 {
 	ifstream in(cam_path);
-	if (in.bad()) {
+	if (!in) {
 		return false;
 	}
 
@@ -1194,6 +1205,7 @@ void APD::InuputInitialization() {
 		std::cout << "Weak count: " << weak_count << " / " << weak_info_host.cols * weak_info_host.rows << " = " << (float)weak_count / (float)(weak_info_host.cols * weak_info_host.rows) * 100 << "%" << std::endl;
 	}
 	else {
+		neighbours_map_host = cv::Mat::zeros(height, width, CV_32SC1);
 		weak_info_host = cv::Mat::zeros(height, width, CV_8UC1);
 		weak_count = 0;
 		for (int r = 0; r < weak_info_host.rows; ++r) {
@@ -1205,16 +1217,41 @@ void APD::InuputInitialization() {
 	// ==================================================================================================
 	// 这里想直接进行初始化
 
-	plane_hypotheses_host = new float4[cameras[0].height * cameras[0].width];
+	plane_hypotheses_host = new float4[cameras[0].height * cameras[0].width]();
 
-	if (params_host.state == FIRST_INIT) { //原图大小,这里只需要对自身重新生成，然后根据生成结果去用于自身初始化即可
+	const path metric_depth_path = problem.dense_folder / "metric_prior" / (ToFormatIndex(problem.ref_image_id) + ".dmb");
+	const bool has_metric_prior = exists(metric_depth_path);
+	params_host.use_mono_prior = has_metric_prior || (exists(problem.dense_folder / "dep" / (ToFormatIndex(problem.ref_image_id) + ".dmb")) && exists(problem.dense_folder / "sfm" / (ToFormatIndex(problem.ref_image_id) + ".txt")));
+	if (params_host.state == FIRST_INIT && has_metric_prior) {
+		cv::Mat prior_depth, prior_normal;
+		const path normal_path = problem.dense_folder / "metric_prior" / (ToFormatIndex(problem.ref_image_id) + "_normal.dmb");
+		if (!ReadBinMat(metric_depth_path, prior_depth) || prior_depth.type() != CV_32FC1 ||
+		    !ReadBinMat(normal_path, prior_normal) || prior_normal.type() != CV_32FC3 || prior_depth.size() != prior_normal.size())
+			throw std::runtime_error("Invalid metric depth/world-normal prior");
+		RescaleMatToTargetSize<float>(prior_depth, prior_depth, cv::Size(width, height));
+		RescaleMatToTargetSize<cv::Vec3f>(prior_normal, prior_normal, cv::Size(width, height));
+		int valid_count = 0;
+		for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x) {
+			const float d = prior_depth.at<float>(y, x);
+			const cv::Vec3f n = prior_normal.at<cv::Vec3f>(y, x);
+			const float norm = cv::norm(n);
+			if (std::isfinite(d) && d >= params_host.depth_min && d <= params_host.depth_max && std::isfinite(norm) && norm > 0.5f) {
+				plane_hypotheses_host[y * width + x] = make_float4(n[0]/norm, n[1]/norm, n[2]/norm, d);
+				++valid_count;
+			}
+		}
+		std::cout << "Metric MoGe prior loaded: " << valid_count << " / " << width*height << " pixels" << std::endl;
+	} else if (params_host.state == FIRST_INIT && !params_host.use_mono_prior) {
+		std::cout << "No complete prior; using random PatchMatch fallback" << std::endl;
+	}
+	if (params_host.state == FIRST_INIT && params_host.use_mono_prior && !has_metric_prior) {
 	//if (false){
 		path dep_folder = problem.dense_folder / path("dep");
 		path sfm_folder = problem.dense_folder / path("sfm");
 
 		path ref_dep_folder = dep_folder / path(ToFormatIndex(problem.ref_image_id) + ".dmb");
 		cv::Mat dep;
-		ReadBinMat(ref_dep_folder, dep);
+		if (!ReadBinMat(ref_dep_folder, dep) || dep.type() != CV_32FC1 || dep.empty()) throw std::runtime_error("Invalid monocular prior DMB");
 
 		for (int y = 0; y < dep.rows; y++) {
 			for (int x = 0; x < dep.cols; x++) {
@@ -1273,7 +1310,10 @@ void APD::InuputInitialization() {
 			//std::cout << rates[i] << " ";
 		}
 
-		float middle_rate = rates[rates.size() / 2];
+		if (rates.empty()) throw std::runtime_error("No valid SfM samples for monocular prior alignment");
+		std::vector<float> sorted_rates = rates;
+		std::sort(sorted_rates.begin(), sorted_rates.end());
+		float middle_rate = sorted_rates[sorted_rates.size() / 2];
 		for (int y = 0; y < dep.rows; y++) {
 			for (int x = 0; x < dep.cols; x++) {
 				all_rate_map.at<float>(y, x) = middle_rate;
@@ -1362,7 +1402,7 @@ void APD::InuputInitialization() {
 			RescaleMatToTargetSize<float>(dep, dep, cv::Size2i(width, height));
 		}
 
-		cv::Mat normalMap(dep.rows, dep.cols, CV_32FC3);
+		cv::Mat normalMap(dep.rows, dep.cols, CV_32FC3, cv::Scalar(0, 0, -1));
 
 		for (int y = 1; y < height - 1; ++y) {
 			for (int x = 1; x < width - 1; ++x) {
@@ -1570,7 +1610,7 @@ void APD::CudaSpaceInitialization() {
 	cudaMalloc((void**)&fit_plane_hypotheses_cuda, sizeof(float4) * length);
 	cudaMemset(fit_plane_hypotheses_cuda, 0, sizeof(float4) * length);
 
-	cudaMalloc((void**)(&candidate_cuda), length * LAB_BOUNDARY_NUM * NUM_IMAGES * sizeof(short2));
+	cudaMalloc((void**)(&candidate_cuda), length * LAB_BOUNDARY_NUM * (num_images - 1) * sizeof(short2));
 
 	// malloc edge array
 	if (problem.params.use_edge || problem.params.use_limit) {
@@ -1637,10 +1677,14 @@ void APD::SupportInitialization() {
 		path mvs_folder = problem.dense_folder / path("MVS4");
 		path ref_dep_folder = mvs_folder / path(ToFormatIndex(problem.ref_image_id) + ".dmb");
 		cv::Mat ref_dep;
-		ReadBinMat(ref_dep_folder, ref_dep);
-		if (ref_dep.cols != width || ref_dep.rows != height) {
-			std::cerr << "Depth and Normal doesn't match the images' size!\n";
-			RescaleMatToTargetSize<float>(ref_dep, label_host, cv::Size2i(width, height));
+		if (exists(ref_dep_folder)) {
+			if (!ReadBinMat(ref_dep_folder, ref_dep) || ref_dep.type() != CV_32SC1)
+				throw std::runtime_error("MVS4 labels must be CV_32SC1");
+			RescaleMatToTargetSize<int>(ref_dep, label_host, cv::Size2i(width, height));
+		} else {
+			path label_path = problem.result_folder / path("labels_" + std::to_string(scale) + ".dmb");
+			if (!ReadBinMat(label_path, label_host) || label_host.type() != CV_32SC1)
+				throw std::runtime_error("Missing generated image labels");
 		}
 	}
 
@@ -1773,6 +1817,7 @@ void RescaleImageAndCamera(cv::Mat& src, cv::Mat& dst, cv::Mat& depth, Camera& c
 template <typename TYPE>
 void RescaleMatToTargetSize(const cv::Mat& src, cv::Mat& dst, const cv::Size2i& target_size) {
 	if (src.cols == target_size.width && src.rows == target_size.height) {
+		dst = src;
 		return;
 	}
 	const float scale_x = target_size.width / static_cast<float>(src.cols);
@@ -1784,8 +1829,8 @@ void RescaleMatToTargetSize(const cv::Mat& src, cv::Mat& dst, const cv::Size2i& 
 
 	for (int r = 0; r < target_size.height; ++r) {
 		for (int c = 0; c < target_size.width; ++c) {
-			int o_r = static_cast<int>(r / scale_x);
-			int o_c = static_cast<int>(c / scale_y);
+			int o_r = static_cast<int>(r / scale_y);
+			int o_c = static_cast<int>(c / scale_x);
 			if (o_r < 0 || o_c < 0 || o_r >= src_clone.rows || o_c >= src_clone.cols) {
 				continue;
 			}
@@ -1806,6 +1851,47 @@ float GetAngle(const cv::Vec3f& v1, const cv::Vec3f& v2)
 }
 
 // ETH version
+static size_t FilterDepthSpeckles(cv::Mat& depth, const int min_component_size, const float relative_threshold)
+{
+	if (min_component_size <= 1 || depth.empty()) return 0;
+	CV_Assert(depth.type() == CV_32FC1);
+	cv::Mat labels(depth.rows, depth.cols, CV_32SC1, cv::Scalar(-1));
+	std::vector<cv::Point> component;
+	component.reserve(1024);
+	const int dx[4] = { -1, 1, 0, 0 };
+	const int dy[4] = { 0, 0, -1, 1 };
+	int label = 0;
+	size_t removed = 0;
+	for (int y = 0; y < depth.rows; ++y) {
+		for (int x = 0; x < depth.cols; ++x) {
+			if (labels.at<int>(y, x) >= 0 || !(depth.at<float>(y, x) > 0.0f)) continue;
+			component.clear();
+			component.emplace_back(x, y);
+			labels.at<int>(y, x) = label;
+			for (size_t head = 0; head < component.size(); ++head) {
+				const cv::Point p = component[head];
+				const float center_depth = depth.at<float>(p.y, p.x);
+				for (int k = 0; k < 4; ++k) {
+					const int nx = p.x + dx[k], ny = p.y + dy[k];
+					if (nx < 0 || nx >= depth.cols || ny < 0 || ny >= depth.rows || labels.at<int>(ny, nx) >= 0) continue;
+					const float neighbor_depth = depth.at<float>(ny, nx);
+					if (!(neighbor_depth > 0.0f)) continue;
+					const float scale = std::max(center_depth, neighbor_depth);
+					if (std::abs(center_depth - neighbor_depth) > relative_threshold * scale) continue;
+					labels.at<int>(ny, nx) = label;
+					component.emplace_back(nx, ny);
+				}
+			}
+			if (static_cast<int>(component.size()) < min_component_size) {
+				removed += component.size();
+				for (const cv::Point& p : component) depth.at<float>(p.y, p.x) = 0.0f;
+			}
+			++label;
+		}
+	}
+	return removed;
+}
+
 void RunFusion(const path& dense_folder, const std::vector<Problem>& problems)
 {
 	int num_images = problems.size();
@@ -1833,6 +1919,12 @@ void RunFusion(const path& dense_folder, const std::vector<Problem>& problems)
 	if (exists(block_folder)) {
 		use_block = true;
 	}
+	int min_consistent_views = 2;
+	if (const char* value = std::getenv("DVP_FUSION_MIN_CONSISTENT")) min_consistent_views = std::max(1, std::atoi(value));
+	int speckle_size = 7;
+	if (const char* value = std::getenv("DVP_DEPTH_SPECKLE_SIZE")) speckle_size = std::max(0, std::atoi(value));
+	std::cout << "Fusion minimum consistent source views: " << min_consistent_views << std::endl;
+	std::cout << "Depth speckle component size: " << speckle_size << std::endl;
 
 	for (int i = 0; i < num_images; ++i) {
 		const auto& problem = problems[i];
@@ -1851,6 +1943,8 @@ void RunFusion(const path& dense_folder, const std::vector<Problem>& problems)
 		ReadBinMat(depth_path, depth);
 		ReadBinMat(normal_path, normal);
 		ReadBinMat(weak_path, weak);
+		const size_t removed_speckles = FilterDepthSpeckles(depth, speckle_size, 0.05f);
+		std::cout << "Depth speckle filter " << problem.ref_image_id << ": removed " << removed_speckles << " pixels" << std::endl;
 
 		if (use_block) {
 			path block_path = block_folder / path("mask_" + std::to_string(problem.ref_image_id) + ".jpg");
@@ -1908,6 +2002,8 @@ void RunFusion(const path& dense_folder, const std::vector<Problem>& problems)
 					int src_r = int(point.y + 0.5f);
 					int src_c = int(point.x + 0.5f);
 					if (src_c >= 0 && src_c < src_cols && src_r >= 0 && src_r < src_rows) {
+						if (use_block && blocks[src_index].at<uchar>(src_r, src_c) < 128)
+							continue;
 						if (masks[src_index].at<uchar>(src_r, src_c) == 1)
 							continue;
 						float src_depth = depths[src_index].at<float>(src_r, src_c);
@@ -1931,7 +2027,7 @@ void RunFusion(const path& dense_folder, const std::vector<Problem>& problems)
 					}
 				}
 				float factor = (weaks[ref_index].at<uchar>(r, c) == WEAK ? 0.45f : 0.3f);
-				if (num_consistent >= 1 && (dynamic_consistency > factor * num_consistent)) {
+				if (num_consistent >= min_consistent_views && (dynamic_consistency > factor * num_consistent)) {
 					PointList point3D;
 					point3D.coord = consistent_Point;
 					float consistent_Color[3] = { (float)images[ref_index].at<cv::Vec3b>(r, c)[0], (float)images[ref_index].at<cv::Vec3b>(r, c)[1], (float)images[ref_index].at<cv::Vec3b>(r, c)[2] };
