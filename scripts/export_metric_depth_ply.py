@@ -38,6 +38,16 @@ def read_camera(path: Path) -> tuple[np.ndarray, np.ndarray]:
     return world_to_camera, intrinsic
 
 
+def colorize_depth(depth: np.ndarray, minimum: float, maximum: float) -> np.ndarray:
+    """Map metric Z depth to Turbo colors, leaving invalid pixels black."""
+    valid = np.isfinite(depth) & (depth >= minimum) & (depth <= maximum)
+    normalized = np.clip((depth - minimum) / max(maximum - minimum, 1e-6), 0, 1)
+    gray = np.rint(normalized * 255).astype(np.uint8)
+    bgr = cv2.applyColorMap(gray, cv2.COLORMAP_TURBO)
+    bgr[~valid] = 0
+    return bgr
+
+
 def make_points(
     depth: np.ndarray,
     bgr: np.ndarray,
@@ -92,6 +102,38 @@ def write_ply(path: Path, points: np.ndarray) -> None:
         points.tofile(stream)
 
 
+def write_overview(
+    path: Path,
+    panels: list[tuple[str, np.ndarray, int]],
+    minimum: float,
+    maximum: float,
+    columns: int = 4,
+) -> None:
+    tile_width, tile_height = 480, 320
+    rows = (len(panels) + columns - 1) // columns
+    canvas = np.zeros((rows * tile_height + 80, columns * tile_width, 3), np.uint8)
+    for index, (label, image, count) in enumerate(panels):
+        row, column = divmod(index, columns)
+        tile = cv2.resize(image, (tile_width, tile_height), interpolation=cv2.INTER_AREA)
+        text = f"{label}  valid={count:,}"
+        cv2.putText(tile, text, (10, 27), cv2.FONT_HERSHEY_SIMPLEX, 0.68, (0, 0, 0), 4, cv2.LINE_AA)
+        cv2.putText(tile, text, (10, 27), cv2.FONT_HERSHEY_SIMPLEX, 0.68, (255, 255, 255), 1, cv2.LINE_AA)
+        y, x = row * tile_height, column * tile_width
+        canvas[y:y + tile_height, x:x + tile_width] = tile
+
+    bar_y = rows * tile_height + 22
+    bar_x0, bar_x1 = 80, columns * tile_width - 80
+    ramp = np.linspace(0, 255, bar_x1 - bar_x0, dtype=np.uint8)[None, :]
+    colorbar = cv2.applyColorMap(ramp, cv2.COLORMAP_TURBO)
+    canvas[bar_y:bar_y + 24, bar_x0:bar_x1] = colorbar
+    for value in np.linspace(minimum, maximum, 5):
+        x = int(round(bar_x0 + (value - minimum) / (maximum - minimum) * (bar_x1 - bar_x0 - 1)))
+        cv2.line(canvas, (x, bar_y + 24), (x, bar_y + 31), (255, 255, 255), 1)
+        cv2.putText(canvas, f"{value:g}m", (x - 18, bar_y + 53), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+    if not cv2.imwrite(str(path), canvas):
+        raise RuntimeError(f"Could not write {path}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run", type=Path, required=True)
@@ -100,13 +142,22 @@ def main() -> None:
     parser.add_argument("--depth-min", type=float, default=0.5)
     parser.add_argument("--depth-max", type=float, default=80.0)
     parser.add_argument("--far-min", type=float, default=40.0)
+    parser.add_argument("--write-depth-rgb", action="store_true")
+    parser.add_argument("--full-depth-colors", action="store_true")
+    parser.add_argument("--skip-far", action="store_true")
     args = parser.parse_args()
 
     manifest = json.loads((args.run / "manifest.json").read_text())
     by_label = {item["source_label"]: item for item in manifest["images"]}
     args.output.mkdir(parents=True, exist_ok=True)
     combined = []
-    report = {"depth_convention": "camera optical-axis Z in meters", "items": []}
+    panels = []
+    report = {
+        "depth_convention": "camera optical-axis Z in meters",
+        "visualization_range_m": [args.depth_min, args.depth_max],
+        "visualization_colormap": "OpenCV Turbo; invalid pixels are black",
+        "items": [],
+    }
 
     for label in args.labels:
         item = by_label[label]
@@ -118,21 +169,52 @@ def main() -> None:
             raise ValueError(f"Missing or mismatched image for {label}")
         world_to_camera, intrinsic = read_camera(args.run / "scene" / "cams" / f"{stem}_cam.txt")
 
-        full = make_points(depth, bgr, world_to_camera, intrinsic, args.depth_min, args.depth_max, False)
-        far = make_points(depth, bgr, world_to_camera, intrinsic, args.far_min, args.depth_max, True)
+        full = make_points(
+            depth, bgr, world_to_camera, intrinsic, args.depth_min, args.depth_max,
+            args.full_depth_colors,
+        )
+        valid_depths = depth[np.isfinite(depth) & (depth >= args.depth_min) & (depth <= args.depth_max)]
+        if args.write_depth_rgb:
+            depth_bgr = colorize_depth(depth, args.depth_min, args.depth_max)
+            depth_path = args.output / f"{label}_moge_metric_depth_rgb.png"
+            if not cv2.imwrite(str(depth_path), depth_bgr):
+                raise RuntimeError(f"Could not write {depth_path}")
+            panels.append((label, depth_bgr, len(full)))
         write_ply(args.output / f"{label}_moge_metric_full.ply", full)
-        write_ply(args.output / f"{label}_moge_metric_far_{args.far_min:g}_{args.depth_max:g}m.ply", far)
-        combined.append(far)
-        report["items"].append({
-            "label": label, "image_id": image_id, "full_points": len(full), "far_points": len(far),
-            "far_fraction": len(far) / max(len(full), 1),
+        item_report = {
+            "label": label, "image_id": image_id, "full_points": len(full),
             "depth_z_min": float(full["depth_z"].min()), "depth_z_max": float(full["depth_z"].max()),
+            "depth_z_p50": float(np.quantile(valid_depths, 0.50)),
+            "depth_z_p90": float(np.quantile(valid_depths, 0.90)),
+            "depth_z_p99": float(np.quantile(valid_depths, 0.99)),
+            "points_ge_40m": int(np.count_nonzero(valid_depths >= 40.0)),
+            "points_ge_60m": int(np.count_nonzero(valid_depths >= 60.0)),
+            "points_ge_75m": int(np.count_nonzero(valid_depths >= 75.0)),
             "euclidean_range_max": float(full["range"].max()),
-        })
+        }
+        if not args.skip_far:
+            far = make_points(depth, bgr, world_to_camera, intrinsic, args.far_min, args.depth_max, True)
+            write_ply(args.output / f"{label}_moge_metric_far_{args.far_min:g}_{args.depth_max:g}m.ply", far)
+            combined.append(far)
+            item_report.update({
+                "far_points": len(far),
+                "far_fraction": len(far) / max(len(full), 1),
+            })
+        report["items"].append(item_report)
 
-    merged = np.concatenate(combined)
-    write_ply(args.output / f"combined_moge_metric_far_{args.far_min:g}_{args.depth_max:g}m.ply", merged)
-    report["combined_far_points"] = len(merged)
+    if combined:
+        merged = np.concatenate(combined)
+        write_ply(args.output / f"combined_moge_metric_far_{args.far_min:g}_{args.depth_max:g}m.ply", merged)
+        report["combined_far_points"] = len(merged)
+    if panels:
+        write_overview(args.output / "depth_rgb_overview_20.png", panels, args.depth_min, args.depth_max)
+    report["aggregate"] = {
+        "selected_images": len(report["items"]),
+        "valid_points": sum(item["full_points"] for item in report["items"]),
+        "points_ge_40m": sum(item["points_ge_40m"] for item in report["items"]),
+        "points_ge_60m": sum(item["points_ge_60m"] for item in report["items"]),
+        "points_ge_75m": sum(item["points_ge_75m"] for item in report["items"]),
+    }
     (args.output / "export_report.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))
 
