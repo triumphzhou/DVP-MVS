@@ -48,6 +48,29 @@ def colorize_depth(depth: np.ndarray, minimum: float, maximum: float) -> np.ndar
     return bgr
 
 
+def resize_inputs(
+    depth: np.ndarray,
+    bgr: np.ndarray,
+    intrinsic: np.ndarray,
+    factor: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if factor == 1:
+        return depth, bgr, intrinsic
+    height, width = depth.shape
+    if width % factor or height % factor:
+        raise ValueError(f"Input size {width}x{height} is not divisible by resize factor {factor}")
+    output_size = (width // factor, height // factor)
+    nearest = getattr(cv2, "INTER_NEAREST_EXACT", cv2.INTER_NEAREST)
+    resized_depth = cv2.resize(depth, output_size, interpolation=nearest)
+    resized_bgr = cv2.resize(bgr, output_size, interpolation=cv2.INTER_AREA)
+    resized_intrinsic = intrinsic.copy()
+    resized_intrinsic[0, 0] /= factor
+    resized_intrinsic[1, 1] /= factor
+    resized_intrinsic[0, 2] = (intrinsic[0, 2] + 0.5) / factor - 0.5
+    resized_intrinsic[1, 2] = (intrinsic[1, 2] + 0.5) / factor - 0.5
+    return resized_depth, resized_bgr, resized_intrinsic
+
+
 def make_points(
     depth: np.ndarray,
     bgr: np.ndarray,
@@ -109,7 +132,10 @@ def write_overview(
     maximum: float,
     columns: int = 4,
 ) -> None:
-    tile_width, tile_height = 480, 320
+    source_height, source_width = panels[0][1].shape[:2]
+    overview_scale = min(1.0, 480 / source_width, 320 / source_height)
+    tile_width = int(round(source_width * overview_scale))
+    tile_height = int(round(source_height * overview_scale))
     rows = (len(panels) + columns - 1) // columns
     canvas = np.zeros((rows * tile_height + 80, columns * tile_width, 3), np.uint8)
     for index, (label, image, count) in enumerate(panels):
@@ -143,9 +169,15 @@ def main() -> None:
     parser.add_argument("--depth-max", type=float, default=80.0)
     parser.add_argument("--far-min", type=float, default=40.0)
     parser.add_argument("--write-depth-rgb", action="store_true")
+    parser.add_argument("--write-rgb", action="store_true")
+    parser.add_argument("--write-depth-npy", action="store_true")
     parser.add_argument("--full-depth-colors", action="store_true")
     parser.add_argument("--skip-far", action="store_true")
+    parser.add_argument("--resize-factor", type=int, default=1)
+    parser.add_argument("--overview-columns", type=int, default=4)
     args = parser.parse_args()
+    if args.resize_factor < 1:
+        parser.error("--resize-factor must be at least 1")
 
     manifest = json.loads((args.run / "manifest.json").read_text())
     by_label = {item["source_label"]: item for item in manifest["images"]}
@@ -156,6 +188,7 @@ def main() -> None:
         "depth_convention": "camera optical-axis Z in meters",
         "visualization_range_m": [args.depth_min, args.depth_max],
         "visualization_colormap": "OpenCV Turbo; invalid pixels are black",
+        "resize_factor": args.resize_factor,
         "items": [],
     }
 
@@ -168,6 +201,15 @@ def main() -> None:
         if bgr is None or bgr.shape[:2] != depth.shape:
             raise ValueError(f"Missing or mismatched image for {label}")
         world_to_camera, intrinsic = read_camera(args.run / "scene" / "cams" / f"{stem}_cam.txt")
+        depth, bgr, intrinsic = resize_inputs(depth, bgr, intrinsic, args.resize_factor)
+        suffix = f"_r{args.resize_factor}" if args.resize_factor > 1 else ""
+
+        if args.write_rgb:
+            rgb_path = args.output / f"{label}_rgb{suffix}.jpg"
+            if not cv2.imwrite(str(rgb_path), bgr, [cv2.IMWRITE_JPEG_QUALITY, 95]):
+                raise RuntimeError(f"Could not write {rgb_path}")
+        if args.write_depth_npy:
+            np.save(args.output / f"{label}_depth_m{suffix}.npy", np.ascontiguousarray(depth, dtype=np.float32))
 
         full = make_points(
             depth, bgr, world_to_camera, intrinsic, args.depth_min, args.depth_max,
@@ -176,11 +218,11 @@ def main() -> None:
         valid_depths = depth[np.isfinite(depth) & (depth >= args.depth_min) & (depth <= args.depth_max)]
         if args.write_depth_rgb:
             depth_bgr = colorize_depth(depth, args.depth_min, args.depth_max)
-            depth_path = args.output / f"{label}_moge_metric_depth_rgb.png"
+            depth_path = args.output / f"{label}_depth_rgb{suffix}.png"
             if not cv2.imwrite(str(depth_path), depth_bgr):
                 raise RuntimeError(f"Could not write {depth_path}")
             panels.append((label, depth_bgr, len(full)))
-        write_ply(args.output / f"{label}_moge_metric_full.ply", full)
+        write_ply(args.output / f"{label}_depth{suffix}.ply", full)
         item_report = {
             "label": label, "image_id": image_id, "full_points": len(full),
             "depth_z_min": float(full["depth_z"].min()), "depth_z_max": float(full["depth_z"].max()),
@@ -207,7 +249,10 @@ def main() -> None:
         write_ply(args.output / f"combined_moge_metric_far_{args.far_min:g}_{args.depth_max:g}m.ply", merged)
         report["combined_far_points"] = len(merged)
     if panels:
-        write_overview(args.output / "depth_rgb_overview_20.png", panels, args.depth_min, args.depth_max)
+        write_overview(
+            args.output / f"depth_rgb_overview_{len(panels)}{suffix}.png",
+            panels, args.depth_min, args.depth_max, args.overview_columns,
+        )
     report["aggregate"] = {
         "selected_images": len(report["items"]),
         "valid_points": sum(item["full_points"] for item in report["items"]),
@@ -215,6 +260,8 @@ def main() -> None:
         "points_ge_60m": sum(item["points_ge_60m"] for item in report["items"]),
         "points_ge_75m": sum(item["points_ge_75m"] for item in report["items"]),
     }
+    if report["items"]:
+        report["output_resolution"] = [int(depth.shape[1]), int(depth.shape[0])]
     (args.output / "export_report.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))
 
