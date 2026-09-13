@@ -77,12 +77,19 @@ def camera_normals(depth: np.ndarray, K: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(normal, dtype="<f4")
 
 
-def write_dmap(path: Path, template, depth: np.ndarray, normal: np.ndarray):
+def write_dmap(
+    path: Path,
+    template,
+    depth: np.ndarray,
+    normal: np.ndarray,
+    depth_min: float,
+    depth_max: float,
+):
     header, name, ids, K, R, C = template
     _, _, _, iw, ih, width, height, _, _ = header
     if depth.shape != (height, width):
         raise ValueError(f"shape mismatch for {path.name}: {depth.shape} != {(height, width)}")
-    out_header = (MAGIC, HAS_DEPTH | HAS_NORMAL, 0, iw, ih, width, height, 0.5, 80.0)
+    out_header = (MAGIC, HAS_DEPTH | HAS_NORMAL, 0, iw, ih, width, height, depth_min, depth_max)
     tmp = path.with_suffix(".tmp")
     with tmp.open("wb") as f:
         f.write(HEADER.pack(*out_header))
@@ -103,7 +110,11 @@ def main():
     ap.add_argument("--run", type=Path, required=True)
     ap.add_argument("--templates", type=Path, required=True)
     ap.add_argument("--output", type=Path, required=True)
+    ap.add_argument("--depth-min", type=float, default=0.5)
+    ap.add_argument("--depth-max", type=float, default=80.0)
     args = ap.parse_args()
+    if not 0 < args.depth_min < args.depth_max:
+        ap.error("expected 0 < --depth-min < --depth-max")
 
     manifest = json.loads((args.run / "manifest.json").read_text())
     by_label = {item["source_label"]: item for item in manifest["images"]}
@@ -130,11 +141,23 @@ def main():
         cw, ch = item["content_size"]
         depth = depth[py:py + ch, px:px + cw].copy()
         mask = mask[py:py + ch, px:px + cw]
-        valid = np.isfinite(depth) & (depth >= 0.5) & (depth <= 80.0) & (mask >= 128)
+        valid = (
+            np.isfinite(depth)
+            & (depth >= args.depth_min)
+            & (depth <= args.depth_max)
+            & (mask >= 128)
+        )
         depth[~valid] = 0
         depth = np.ascontiguousarray(depth, dtype="<f4")
         normal = camera_normals(depth, template[3])
-        write_dmap(args.output / template_path.name, template, depth, normal)
+        write_dmap(
+            args.output / template_path.name,
+            template,
+            depth,
+            normal,
+            args.depth_min,
+            args.depth_max,
+        )
         seen.add(label)
         counts.append(int(valid.sum()))
         if index % 50 == 0 or index == len(templates):
@@ -148,7 +171,7 @@ def main():
         "valid_per_image_min": int(min(counts)),
         "valid_per_image_median": float(np.median(counts)),
         "valid_per_image_max": int(max(counts)),
-        "depth_range_m": [0.5, 80.0],
+        "depth_range_m": [args.depth_min, args.depth_max],
         "dmap_channels": ["depth", "camera_normal"],
     }
     (args.output.parent / "conversion_stats.json").write_text(json.dumps(stats, indent=2) + "\n")

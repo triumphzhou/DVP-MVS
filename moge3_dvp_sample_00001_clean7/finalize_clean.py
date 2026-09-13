@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Robustly calibrate priors, filter them, and build the verified 20-view graph."""
 
+import argparse
 import csv
 import json
 import math
@@ -28,9 +29,7 @@ NEIGHBORS_TSV = Path(os.environ.get(
     "00_audit/neighbors_diverse_pm20_top20.tsv",
 ))
 WIDTH, HEIGHT = 960, 640
-DEPTH_MIN, DEPTH_MAX = 0.5, 80.0
 MIN_PRIOR_COMPONENT = 20
-FINALIZATION_VERSION = "clean7-v1"
 
 
 def atomic_bytes(path: Path, data: bytes) -> None:
@@ -100,6 +99,22 @@ def make_normals(depth: np.ndarray, intrinsic: np.ndarray, world_to_camera: np.n
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--depth-min", type=float, default=0.5)
+    parser.add_argument("--depth-max", type=float, default=80.0)
+    parser.add_argument(
+        "--save-unbounded-prior",
+        action="store_true",
+        help="Save calibrated geometry-valid depth and normals before DVP range filtering.",
+    )
+    args = parser.parse_args()
+    if not 0 < args.depth_min < args.depth_max:
+        parser.error("expected 0 < --depth-min < --depth-max")
+    finalization_version = f"clean7-v2-depth-{args.depth_min:g}-{args.depth_max:g}"
+    unbounded_dir = SCENE / "metric_prior_unbounded"
+    if args.save_unbounded_prior:
+        unbounded_dir.mkdir(parents=True, exist_ok=True)
+
     source_images = sorted((SOURCE / "images").glob("*.jpg"))
     if len(source_images) != 707:
         raise RuntimeError(f"Expected 707 source images, got {len(source_images)}")
@@ -145,17 +160,30 @@ def main() -> None:
         raw_scale = record["raw_moge_scale_multiplier"]
         used_scale = record["moge_scale_multiplier"]
         depth_path = SCENE / "metric_prior" / f"{stem}.dmb"
-        if record.get("finalization_version") == FINALIZATION_VERSION:
+        unbounded_depth_path = unbounded_dir / f"{stem}.dmb"
+        unbounded_normal_path = unbounded_dir / f"{stem}_normal.dmb"
+        unbounded_output_complete = (
+            not args.save_unbounded_prior
+            or (unbounded_depth_path.is_file() and unbounded_normal_path.is_file())
+        )
+        if record.get("finalization_version") == finalization_version and unbounded_output_complete:
             total_prior_speckles += int(record.get("prior_small_component_pixels_removed", 0))
             continue
-        depth = read_dmb(depth_path, 1)
-        depth *= used_scale / raw_scale
+        # The preserved prior already contains the robust per-camera scale. Reuse it
+        # without applying that scale a second time when changing the DVP range.
+        reuse_unbounded = (
+            unbounded_depth_path.is_file()
+            and record.get("unbounded_valid_prior_fraction") is not None
+        )
+        if reuse_unbounded:
+            depth = read_dmb(unbounded_depth_path, 1)
+        else:
+            depth = read_dmb(depth_path, 1)
+            depth *= used_scale / raw_scale
         block = cv2.imread(str(SCENE / "blocks" / f"mask_{image_id}.jpg"), cv2.IMREAD_GRAYSCALE)
         if block is None or block.shape != (HEIGHT, WIDTH):
             raise RuntimeError(f"Invalid DVP block mask for {stem}")
-        depth[(block < 128) | ~np.isfinite(depth) | (depth < DEPTH_MIN) | (depth > DEPTH_MAX)] = 0
-        removed = remove_small_components(depth)
-        total_prior_speckles += removed
+        depth[(block < 128) | ~np.isfinite(depth) | (depth <= 0)] = 0
 
         label = record["source_label"]
         source_width, source_height = record["source_size"]
@@ -168,12 +196,27 @@ def main() -> None:
         intrinsic[1, 2] += pad_y
         camera_to_world = np.loadtxt(SOURCE / "ego_pose" / f"{label}.txt", dtype=np.float64)
         world_to_camera = np.linalg.inv(camera_to_world)
+
+        if args.save_unbounded_prior:
+            unbounded_normals = make_normals(depth, intrinsic, world_to_camera)
+            write_dmb(unbounded_depth_path, depth)
+            write_dmb(unbounded_normal_path, unbounded_normals)
+            record["unbounded_valid_prior_fraction"] = float(np.mean(depth > 0))
+            unbounded_values = depth[depth > 0]
+            record["unbounded_depth_max_m"] = (
+                float(unbounded_values.max()) if unbounded_values.size else None
+            )
+
+        depth[(depth < args.depth_min) | (depth > args.depth_max)] = 0
+        removed = remove_small_components(depth)
+        total_prior_speckles += removed
+
         normals = make_normals(depth, intrinsic, world_to_camera)
         write_dmb(depth_path, depth)
         write_dmb(SCENE / "metric_prior" / f"{stem}_normal.dmb", normals)
         record["valid_prior_fraction"] = float(np.mean(depth > 0))
         record["prior_small_component_pixels_removed"] = removed
-        record["finalization_version"] = FINALIZATION_VERSION
+        record["finalization_version"] = finalization_version
         atomic_bytes(SCENE / "metadata" / f"{stem}.json", (json.dumps(record, indent=2) + "\n").encode())
 
     label_to_id = {record["source_label"]: record["id"] for record in records}
@@ -215,7 +258,9 @@ def main() -> None:
             "prior_component_filter_pixels": MIN_PRIOR_COMPONENT,
             "fusion_depth_component_filter_pixels": 7,
             "fusion_depth_component_relative_threshold": 0.05,
-            "depth_range_m": [DEPTH_MIN, DEPTH_MAX],
+            "depth_range_m": [args.depth_min, args.depth_max],
+            "unbounded_metric_prior_saved": args.save_unbounded_prior,
+            "unbounded_metric_prior_directory": "scene/metric_prior_unbounded" if args.save_unbounded_prior else None,
         },
         "calibration": calibration_report,
         "prior_small_component_pixels_removed": total_prior_speckles,

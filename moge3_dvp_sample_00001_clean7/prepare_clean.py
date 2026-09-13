@@ -10,7 +10,6 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import torch
 
 
 ROOT = Path(os.environ.get("DVP_RUN_ROOT", Path(__file__).resolve().parent))
@@ -51,13 +50,40 @@ def valid_dmb(path: Path) -> bool:
     return path.is_file() and path.stat().st_size == 16 + WIDTH * HEIGHT * 4
 
 
-def write_camera(path: Path, extrinsic: np.ndarray, intrinsic: np.ndarray) -> None:
+def metadata_matches_request(
+    path: Path,
+    depth_min: float,
+    depth_max: float,
+    unbounded_lidar_calibration: bool,
+) -> bool:
+    try:
+        metadata = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return False
+    expected_upper_bound = None if unbounded_lidar_calibration else 80.0
+    return (
+        metadata.get("dvp_depth_range_m") == [depth_min, depth_max]
+        and metadata.get("lidar_calibration_upper_bound_m") == expected_upper_bound
+    )
+
+
+def write_camera(
+    path: Path,
+    extrinsic: np.ndarray,
+    intrinsic: np.ndarray,
+    depth_min: float,
+    depth_max: float,
+) -> None:
     text = "extrinsic\n"
     text += "\n".join(" ".join(f"{v:.12g}" for v in row) for row in extrinsic)
     text += "\n\nintrinsic\n"
     text += "\n".join(" ".join(f"{v:.12g}" for v in row) for row in intrinsic)
-    # APD expands these endpoints by 0.6 and 1.2, producing 0.5--80 m.
-    text += "\n\n0.8333333333 0.25 265 66.6666666667\n"
+    # APD expands the stored endpoints by 0.6 and 1.2 when creating its search range.
+    stored_min = depth_min / 0.6
+    stored_max = depth_max / 1.2
+    interval = 0.25
+    depth_num = max(2, int(round((stored_max - stored_min) / interval)) + 1)
+    text += f"\n\n{stored_min:.12g} {interval:.12g} {depth_num} {stored_max:.12g}\n"
     atomic_bytes(path, text.encode())
 
 
@@ -76,7 +102,16 @@ def main() -> None:
     parser.add_argument("--num-shards", type=int, required=True)
     parser.add_argument("--resolution-level", type=int, default=9)
     parser.add_argument("--refine-steps", type=int, default=3)
+    parser.add_argument("--depth-min", type=float, default=0.5)
+    parser.add_argument("--depth-max", type=float, default=80.0)
+    parser.add_argument(
+        "--unbounded-lidar-calibration",
+        action="store_true",
+        help="Use every finite LiDAR depth above 2 m when calibrating the MoGe scale.",
+    )
     args = parser.parse_args()
+    if not 0 < args.depth_min < args.depth_max:
+        parser.error("expected 0 < --depth-min < --depth-max")
 
     for name in ("images", "cams", "metric_prior", "metadata", "blocks"):
         (SCENE / name).mkdir(parents=True, exist_ok=True)
@@ -89,10 +124,19 @@ def main() -> None:
         required = [
             SCENE / "images" / f"{stem}.jpg",
             SCENE / "cams" / f"{stem}_cam.txt",
-            SCENE / "metadata" / f"{stem}.json",
             SCENE / "blocks" / f"mask_{image_id}.jpg",
         ]
-        if valid_dmb(SCENE / "metric_prior" / f"{stem}.dmb") and all(p.is_file() for p in required):
+        metadata_path = SCENE / "metadata" / f"{stem}.json"
+        if (
+            valid_dmb(SCENE / "metric_prior" / f"{stem}.dmb")
+            and all(p.is_file() for p in required)
+            and metadata_matches_request(
+                metadata_path,
+                args.depth_min,
+                args.depth_max,
+                args.unbounded_lidar_calibration,
+            )
+        ):
             print(f"[{args.shard}] skip complete {stem} {image_path.stem}", flush=True)
         else:
             pending.append((image_id, image_path))
@@ -101,6 +145,7 @@ def main() -> None:
         print(f"[{args.shard}] all {len(selected)} images already complete", flush=True)
         return
 
+    import torch
     from moge.model import import_model_class_by_version
 
     model = import_model_class_by_version("v3").from_pretrained(str(WEIGHTS)).cuda().eval()
@@ -149,8 +194,9 @@ def main() -> None:
             & keep_content[resized_y, resized_x]
             & np.isfinite(lidar_values)
             & (lidar_values > 2.0)
-            & (lidar_values < 80.0)
         )
+        if not args.unbounded_lidar_calibration:
+            calibration &= lidar_values < 80.0
         ratios = lidar_values[calibration] / sampled[calibration]
         if ratios.size < 100:
             raise RuntimeError(f"Only {ratios.size} LiDAR calibration pixels for {label}")
@@ -186,7 +232,13 @@ def main() -> None:
             raise RuntimeError(f"Cannot write {block_temp}")
         os.replace(image_temp, SCENE / "images" / f"{stem}.jpg")
         os.replace(block_temp, SCENE / "blocks" / f"mask_{image_id}.jpg")
-        write_camera(SCENE / "cams" / f"{stem}_cam.txt", world_to_camera, intrinsic)
+        write_camera(
+            SCENE / "cams" / f"{stem}_cam.txt",
+            world_to_camera,
+            intrinsic,
+            args.depth_min,
+            args.depth_max,
+        )
 
         metadata = {
             "id": image_id,
@@ -199,6 +251,8 @@ def main() -> None:
             "lidar_calibration_pixels": int(ratios.size),
             "raw_valid_prior_fraction": float(np.mean(depth > 0)),
             "block_keep_fraction": float(np.mean(block >= 128)),
+            "lidar_calibration_upper_bound_m": None if args.unbounded_lidar_calibration else 80.0,
+            "dvp_depth_range_m": [args.depth_min, args.depth_max],
         }
         atomic_bytes(SCENE / "metadata" / f"{stem}.json", (json.dumps(metadata, indent=2) + "\n").encode())
         elapsed = time.time() - started

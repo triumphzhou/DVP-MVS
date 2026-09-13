@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
-OUT=/mnt/zhoukaixuan_workspace/code/DVP-MVS/moge3_dvp_sample_00001_clean7/openmvs_fusion
-/mnt/nuplan/open-source-projects/openMVS/install/bin/OpenMVS/DensifyPointCloud \
+REPO=${DVP_REPO:-/mnt/zhoukaixuan_workspace/code/DVP-MVS}
+RUN_ROOT=${DVP_RUN_ROOT:-$REPO/moge3_dvp_sample_00001_clean7}
+OUT=${DVP_OPENMVS_OUTPUT:-$RUN_ROOT/openmvs_fusion}
+OPENMVS_ROOT=${DVP_OPENMVS_ROOT:-/mnt/nuplan/l3data-reconstruction-bingxing/tem-test/colmap+openmvs/batch8_first8_roadmesh/results/sample_00001_clip_M18-2_07_20251202093910_DF_f76_176_left}
+OPENMVS_BIN=${DVP_OPENMVS_BIN:-/mnt/nuplan/open-source-projects/openMVS/install/bin/OpenMVS/DensifyPointCloud}
+
+"$OPENMVS_BIN" \
   -w "$OUT/dmaps" \
-  -i /mnt/nuplan/l3data-reconstruction-bingxing/tem-test/colmap+openmvs/batch8_first8_roadmesh/results/sample_00001_clip_M18-2_07_20251202093910_DF_f76_176_left/02_openmvs/global/scene.mvs \
+  -i "$OPENMVS_ROOT/02_openmvs/global/scene.mvs" \
   -o "$OUT/dvp_openmvs_fused.mvs" \
-  --dense-config-file "$OUT/dense_config.cfg" \
-  --mask-path /mnt/nuplan/l3data-reconstruction-bingxing/tem-test/colmap+openmvs/batch8_first8_roadmesh/results/sample_00001_clip_M18-2_07_20251202093910_DF_f76_176_left/01_masks/openmvs_masks \
+  --dense-config-file "$REPO/moge3_dvp_sample_00001_clean7/openmvs_fusion/dense_config.cfg" \
+  --mask-path "$OPENMVS_ROOT/01_masks/openmvs_masks" \
   --ignore-mask-label 255 \
-  --view-neighbors-file /mnt/nuplan/l3data-reconstruction-bingxing/tem-test/colmap+openmvs/batch8_first8_roadmesh/results/sample_00001_clip_M18-2_07_20251202093910_DF_f76_176_left/00_audit/neighbors_diverse_pm20_top20.txt \
+  --view-neighbors-file "$OPENMVS_ROOT/00_audit/neighbors_diverse_pm20_top20.txt" \
   --cuda-device -2 --max-threads 8 \
   --resolution-level 1 --max-resolution 960 --min-resolution 640 --sub-resolution-levels 2 \
   --number-views 20 --number-views-fuse 2 --iters 4 --geometric-iters 0 \
