@@ -19,6 +19,10 @@
 
 当前实现是部分参数和输入对齐，并不代表 DVP 与 OpenMVS 两套过滤、融合算法完全一致。尤其是视图计数口径、散斑实现和一致性判定，不能仅凭参数数值相同就认为等价。
 
+上述 DVP 原生融合仍可供历史脚本使用；当前
+[MVS 批处理](mvs_process/run_batch_mvsnet_to_openmvs_ply.sh) 设置 `DVP_SKIP_FUSION=1`，
+只保留 DVP 逐视角深度估计，最终点云统一由 OpenMVS 过滤和融合生成。
+
 ## 2. OpenMVS 深度过滤与融合入口
 
 运行脚本：

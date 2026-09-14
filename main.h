@@ -30,6 +30,7 @@
 #include <cstdarg>
 #include <random>
 #include <unordered_map>
+#include <cstdlib>
 // Includes Boost filesystem
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>

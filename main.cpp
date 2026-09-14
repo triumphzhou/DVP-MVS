@@ -554,7 +554,15 @@ int main(int argc, char** argv) {
 		std::cout << "Round: " << i << " done\n";
 	}
 
-	if (worker_index == 0) RunFusion(dense_folder, all_problems);
+	if (worker_index == 0) {
+		const char* skip_fusion = std::getenv("DVP_SKIP_FUSION");
+		if (skip_fusion != nullptr && std::atoi(skip_fusion) != 0) {
+			std::cout << "Skipping DVP native fusion (DVP_SKIP_FUSION is set)\n";
+		}
+		else {
+			RunFusion(dense_folder, all_problems);
+		}
+	}
 	// {// delete files
 	// 	for (size_t i = 0; i < problems.size(); ++i) {
 	// 		const auto &problem = problems[i];

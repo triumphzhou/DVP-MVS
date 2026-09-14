@@ -1,7 +1,7 @@
 # MVS processing：准备好的多视图数据到点云
 
-本文档从数据预处理完成的多视图样本开始，说明 MoGeV3 深度先验、DVP-MVS PatchMatch、
-DVP 自身融合，以及 OpenMVS depth filter/dense-fuse 到最终 PLY 的完整流程。
+本文档从数据预处理完成的多视图样本开始，说明 MoGeV3 深度先验、DVP-MVS PatchMatch，
+以及 OpenMVS depth filter/dense-fuse 到最终 PLY 的完整流程。批处理已关闭 DVP 原生融合。
 
 上游 PKL 到 `03_converted`、COLMAP 固定姿态模型和 `scene.mvs` 的过程见
 [`data_preprocess/README.zh-CN.md`](../data_preprocess/README.zh-CN.md)。本流程不读取原始 PKL，
@@ -20,6 +20,9 @@ mvs_process/
 ├── config.example.env
 └── README.zh-CN.md
 ```
+
+关闭原生融合依赖当前源码中的 `DVP_SKIP_FUSION` 开关。首次使用或更新代码后需要重新
+编译 `build/APD`；批处理预检会拒绝不支持该开关的旧二进制，防止误跑 DVP 融合。
 
 ## 从准备好的多视图数据批量运行到点云
 
@@ -40,7 +43,7 @@ MoGeV3、DVP-MVS 和 OpenMVS depth filter/fusion：
   -> openmvs_filtered_fused.ply
 ```
 
-## 从 MVSNet 风格数据到 DVP-MVS 点云
+## 从 MVSNet 风格数据到 OpenMVS 融合点云
 
 这里需要区分两个目录。`03_converted/` 是归一化后的传感器数据，还不是 APD 直接读取的
 MVSNet 格式；batch 阶段 1 会把它和 mask、邻居关系转换为 `09_dvp/scene/`。后者才是 DVP-MVS
@@ -87,7 +90,7 @@ LiDAR 点，不再排除 80 m 以外的点。最终先验和 APD 搜索范围仍
 随后按相机对尺度做中位数/MAD 稳健裁剪，删除小于 20 像素的孤立深度块，并由深度
 反投影计算世界坐标法线。
 
-### Batch 阶段 2：APD 深度估计和 DVP 融合
+### Batch 阶段 2：APD 深度估计
 
 APD 从 `scene/pair.txt` 开始逐张读取参考图、20 张源图、相机、mask、米制深度和法线
 先验。`960×640` 输入使用 `480×320` 和 `960×640` 两层金字塔进行 PatchMatch。
@@ -100,13 +103,8 @@ APD 从 `scene/pair.txt` 开始逐张读取参考图、20 张源图、相机、m
 09_dvp/scene/APD/<八位图像ID>/selected_views.bin
 ```
 
-APD 随后执行 DVP 自己的多视角几何一致性融合，生成：
-
-```text
-09_dvp/scene/APD/APD.ply
-```
-
-该点云是 **DVP-MVS 融合结果**，没有经过 OpenMVS depth filter。
+批处理运行 APD 时设置 `DVP_SKIP_FUSION=1`。APD 只保存逐视角深度、法线和辅助数据，
+不再调用 DVP 的 `RunFusion`，也不生成 `09_dvp/scene/APD/APD.ply`。
 
 ### Batch 阶段 3–4：OpenMVS 深度过滤和融合
 
@@ -129,12 +127,11 @@ OpenMVS 随后读取这些 DVP 深度，使用 `--postprocess-dmaps 1` 删除 sp
 10_openmvs_fusion/openmvs_filtered_fused.ply
 ```
 
-两个 PLY 的区别如下：
+批处理只输出一个融合点云：
 
 | 点云 | 深度来源 | 深度过滤与融合程序 |
 |---|---|---|
-| `09_dvp/scene/APD/APD.ply` | DVP-MVS `depths.dmb` | DVP-MVS `RunFusion` |
-| `10_openmvs_fusion/openmvs_filtered_fused.ply` | 同一批 DVP-MVS 深度转成 DMAP | OpenMVS speckle filter + dense-fuse |
+| `10_openmvs_fusion/openmvs_filtered_fused.ply` | DVP-MVS `depths.dmb` 转成 DMAP | OpenMVS speckle filter + dense-fuse |
 
 ## 批次运行方法
 
@@ -188,10 +185,9 @@ Batch 阶段 3 根据当前 `scene.mvs`、COLMAP image ID 和邻居文件生成 
 的 OpenMVS 深度模板。阶段 4 使用 `--postprocess-dmaps 1` 去除深度 speckle，再以
 `--fusion-filter 2`、两视角最低支持执行 dense-fuse；输入深度是 DVP-MVS 的输出。
 
-结果目录中的两个点云位于：
+最终点云位于：
 
 ```text
-<result-root>/09_dvp/scene/APD/APD.ply
 <result-root>/10_openmvs_fusion/openmvs_filtered_fused.ply
 ```
 

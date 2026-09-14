@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Batch pipeline: prepared multi-view data -> MoGeV3 -> DVP-MVS -> OpenMVS fused PLY.
+# Batch pipeline: prepared multi-view data -> MoGeV3 -> DVP depth maps -> OpenMVS fused PLY.
 set -Eeuo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -68,7 +68,7 @@ Options:
 
 Stages:
   1  converted data -> MoGeV3 priors and DVP MVSNet-style scene
-  2  DVP-MVS PatchMatch and DVP APD.ply fusion
+  2  DVP-MVS PatchMatch depth estimation (native DVP fusion disabled)
   3  DVP depth maps -> OpenMVS DMAP
   4  OpenMVS depth filter and dense-fuse -> PLY
 
@@ -117,7 +117,10 @@ preflight() {
     env PYTHONPATH="$MOGE_ROOT${PYTHONPATH:+:$PYTHONPATH}" "$MOGE_PYTHON" -c \
       'import cv2, numpy, torch, moge' || die "MoGe Python cannot import the required runtime"
   fi
-  if (( FROM_STAGE <= 2 && TO_STAGE >= 2 )); then require_exe "$DVP_BIN"; fi
+  if (( FROM_STAGE <= 2 && TO_STAGE >= 2 )); then
+    require_exe "$DVP_BIN"
+    grep -aq 'DVP_SKIP_FUSION' "$DVP_BIN" || die "DVP executable lacks native-fusion skip support; rebuild build/APD from the current source"
+  fi
   if (( FROM_STAGE <= 4 && TO_STAGE >= 3 )); then
     require_file "$DMAP_CONVERTER"
     if [[ "$DMAP_PYTHON" == */* ]]; then require_exe "$DMAP_PYTHON"; else require_command "$DMAP_PYTHON"; fi
@@ -178,16 +181,27 @@ run_moge_prepare() {
   require_file "$run_root/manifest.json"; require_file "$run_root/scene/pair.txt"; mark_done "$marker"
 }
 
-run_dvp() {
-  local run_root=$1 state=$2 logs=$3 marker="$2/step_10_dvp.complete"
-  if stage_done "$marker"; then echo "reuse stage 2 (DVP-MVS)"; return; fi
+verify_dvp_depths() {
+  local run_root=$1 expected depth_count normal_count
+  require_dir "$run_root/scene/APD"
+  read -r expected <"$run_root/scene/pair.txt"
+  [[ "$expected" =~ ^[0-9]+$ && "$expected" -gt 0 ]] || die "invalid image count in DVP pair.txt"
+  depth_count=$(find "$run_root/scene/APD" -mindepth 2 -maxdepth 2 -type f -name 'depths.dmb' | wc -l)
+  normal_count=$(find "$run_root/scene/APD" -mindepth 2 -maxdepth 2 -type f -name 'APD_normals.dmb' | wc -l)
+  [[ "$depth_count" -eq "$expected" ]] || die "expected $expected DVP depth maps, found $depth_count"
+  [[ "$normal_count" -eq "$expected" ]] || die "expected $expected DVP normal maps, found $normal_count"
+}
+
+run_dvp_depths() {
+  local run_root=$1 state=$2 logs=$3 marker="$2/step_10_dvp_depths.complete"
+  if stage_done "$marker"; then echo "reuse stage 2 (DVP-MVS depth maps)"; return; fi
   rm -rf "$run_root/scene/APD" "$run_root/scene/APD_parallel_barrier"
   mkdir -p "$run_root/scene/APD" "$logs"
   local worker status=0 count=${#GPU_ARRAY[@]}
   local -a pids=()
   for worker in "${!GPU_ARRAY[@]}"; do
-    (cd "$REPO"; env CUDA_VISIBLE_DEVICES="${GPU_ARRAY[$worker]}" DVP_FUSION_MIN_CONSISTENT="${DVP_FUSION_MIN_CONSISTENT:-2}" \
-      DVP_DEPTH_SPECKLE_SIZE="${DVP_DEPTH_SPECKLE_SIZE:-7}" "$DVP_BIN" "$run_root/scene" 0 "$worker" "$count" \
+    (cd "$REPO"; env CUDA_VISIBLE_DEVICES="${GPU_ARRAY[$worker]}" DVP_SKIP_FUSION=1 \
+      "$DVP_BIN" "$run_root/scene" 0 "$worker" "$count" \
       >"$logs/dvp-worker-$worker.log" 2>&1) &
     pids+=("$!")
   done
@@ -196,7 +210,8 @@ run_dvp() {
   done
   [[ "$status" == 0 ]] || return "$status"
   cat "$logs"/dvp-worker-*.log >"$logs/dvp.log"
-  [[ -s "$run_root/scene/APD/APD.ply" ]] || die "DVP did not produce APD.ply"
+  verify_dvp_depths "$run_root"
+  [[ ! -e "$run_root/scene/APD/APD.ply" ]] || die "DVP native fusion was not disabled"
   mark_done "$marker"
 }
 
@@ -248,7 +263,7 @@ process_sample() {
 
   local request="$state/dvp_openmvs_request.txt" request_tmp="$state/dvp_openmvs_request.tmp"
   cat >"$request_tmp" <<EOF
-pipeline_version=2
+pipeline_version=3
 source=$sample_root
 depth_min=$DEPTH_MIN
 depth_max=$DEPTH_MAX
@@ -261,15 +276,14 @@ EOF
 
   printf '\n[%s] %s, stages %s-%s\n' "$(date '+%F %T')" "$sample_name" "$FROM_STAGE" "$TO_STAGE"
   if (( FROM_STAGE <= 1 && TO_STAGE >= 1 )); then run_moge_prepare "$run_root" "$source" "$masks" "$neighbors_tsv" "$state" "$logs"; fi
-  if (( FROM_STAGE <= 2 && TO_STAGE >= 2 )); then require_file "$run_root/scene/pair.txt"; run_dvp "$run_root" "$state" "$logs"; fi
+  if (( FROM_STAGE <= 2 && TO_STAGE >= 2 )); then require_file "$run_root/scene/pair.txt"; run_dvp_depths "$run_root" "$state" "$logs"; fi
   if (( FROM_STAGE <= 3 && TO_STAGE >= 3 )); then
-    require_file "$run_root/scene/APD/APD.ply"; convert_dmaps "$run_root" "$source" "$scene" "$images_txt" "$neighbors" "$fusion_root" "$state" "$logs" 0
+    verify_dvp_depths "$run_root"; convert_dmaps "$run_root" "$source" "$scene" "$images_txt" "$neighbors" "$fusion_root" "$state" "$logs" 0
   fi
   if (( FROM_STAGE <= 4 && TO_STAGE >= 4 )); then
     require_file "$state/step_11_dmap_conversion.complete"; run_openmvs "$run_root" "$source" "$scene" "$images_txt" "$neighbors" "$masks" "$fusion_root" "$state" "$logs"
   fi
   echo "PASS: $sample_name completed through stage $TO_STAGE"
-  [[ ! -s "$run_root/scene/APD/APD.ply" ]] || echo "  DVP point cloud:     $run_root/scene/APD/APD.ply"
   [[ ! -s "$fusion_root/openmvs_filtered_fused.ply" ]] || echo "  OpenMVS point cloud: $fusion_root/openmvs_filtered_fused.ply"
 }
 
