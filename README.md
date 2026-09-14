@@ -34,6 +34,17 @@ cuda compilation parameter 'arch=compute_86,code=sm_86' or add a '-gencode arch=
 
 ## Usage
 ## Usage
+
+### L3 PKL data preprocessing
+
+The repository-local eight-step preprocessing pipeline converts an M18/L3 PKL segment into
+an OpenMVS `scene.mvs`, masks, and view-neighbor file. See
+[data_preprocess/README.zh-CN.md](data_preprocess/README.zh-CN.md) and run:
+
+```bash
+bash data_preprocess/run_preprocess_1_to_8.sh --check
+```
+
 - Compile
 >
     mkdir build & cd build
