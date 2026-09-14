@@ -4,9 +4,9 @@ set -Eeuo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(cd -- "$SCRIPT_DIR/.." && pwd)
-DVP_PREPARE="$REPO/moge3_dvp_sample_00001_clean7/prepare_clean.py"
-DVP_FINALIZE="$REPO/moge3_dvp_sample_00001_clean7/finalize_clean.py"
-DMAP_CONVERTER="$SCRIPT_DIR/steps/11_convert_dvp_to_openmvs_dmap.py"
+DVP_PREPARE="$SCRIPT_DIR/prepare_dvp_scene.py"
+DVP_FINALIZE="$SCRIPT_DIR/finalize_dvp_scene.py"
+DMAP_CONVERTER="$SCRIPT_DIR/convert_dvp_to_openmvs_dmap.py"
 DENSE_CONFIG="$SCRIPT_DIR/openmvs_dvp_depth_filter.cfg"
 
 DMAP_PYTHON=${PYTHON_BIN:-python3}
@@ -36,12 +36,12 @@ RESULT_ROOT=
 usage() {
   cat <<'EOF'
 Usage (one prepared sample):
-  bash data_preprocess/run_batch_mvsnet_to_openmvs_ply.sh \
+  bash mvs_process/run_batch_mvsnet_to_openmvs_ply.sh \
     --sample-root /path/to/preprocessed/sample [--result-root DIR] [options]
 
 Usage (batch TSV):
-  bash data_preprocess/run_batch_mvsnet_to_openmvs_ply.sh \
-    --batch-file data_preprocess/batch.example.tsv [options]
+  bash mvs_process/run_batch_mvsnet_to_openmvs_ply.sh \
+    --batch-file mvs_process/batch.example.tsv [options]
 
 sample-root must be an output of run_preprocess_1_to_8.sh containing:
   03_converted/

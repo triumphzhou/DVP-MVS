@@ -127,7 +127,7 @@ neighbors   = 08_openmvs_input/global/neighbors_diverse_pm20_top20.txt
 步骤 8 生成准备好的多视图/OpenMVS 样本后，MoGeV3、DVP-MVS、OpenMVS depth filter、
 dense-fuse 和最终 PLY 的处理已拆分到
 [`mvs_process/README.zh-CN.md`](../mvs_process/README.zh-CN.md)。对应入口为
-[`run_batch_mvsnet_to_openmvs_ply.sh`](run_batch_mvsnet_to_openmvs_ply.sh)。
+[`run_batch_mvsnet_to_openmvs_ply.sh`](../mvs_process/run_batch_mvsnet_to_openmvs_ply.sh)。
 
 ## 代码来源与改动
 

@@ -7,9 +7,23 @@ DVP 自身融合，以及 OpenMVS depth filter/dense-fuse 到最终 PLY 的完�
 [`data_preprocess/README.zh-CN.md`](../data_preprocess/README.zh-CN.md)。本流程不读取原始 PKL，
 也不运行 COLMAP。
 
+本目录集中保存这一阶段的通用代码：
+
+```text
+mvs_process/
+├── run_batch_mvsnet_to_openmvs_ply.sh
+├── prepare_dvp_scene.py
+├── finalize_dvp_scene.py
+├── convert_dvp_to_openmvs_dmap.py
+├── openmvs_dvp_depth_filter.cfg
+├── batch.example.tsv
+├── config.example.env
+└── README.zh-CN.md
+```
+
 ## 从准备好的多视图数据批量运行到点云
 
-[`run_batch_mvsnet_to_openmvs_ply.sh`](../data_preprocess/run_batch_mvsnet_to_openmvs_ply.sh) 不处理 PKL，
+[`run_batch_mvsnet_to_openmvs_ply.sh`](run_batch_mvsnet_to_openmvs_ply.sh) 不处理 PKL，
 也不运行 COLMAP。它只读取 `run_preprocess_1_to_8.sh` 已经生成的多视图样本目录，执行
 MoGeV3、DVP-MVS 和 OpenMVS depth filter/fusion：
 
@@ -45,8 +59,8 @@ MVSNet 格式；batch 阶段 1 会把它和 mask、邻居关系转换为 `09_dvp
 
 标准 MVSNet 的 `images/cams/pair.txt` 还不够用于当前定制版 APD；还需要
 `metric_prior` 和 `blocks`。它们由
-[`prepare_clean.py`](../moge3_dvp_sample_00001_clean7/prepare_clean.py) 和
-[`finalize_clean.py`](../moge3_dvp_sample_00001_clean7/finalize_clean.py) 生成。
+[`prepare_dvp_scene.py`](prepare_dvp_scene.py) 和
+[`finalize_dvp_scene.py`](finalize_dvp_scene.py) 生成。
 
 ### Batch 阶段 1：生成 DVP-MVS 输入
 
@@ -96,7 +110,7 @@ APD 随后执行 DVP 自己的多视角几何一致性融合，生成：
 
 ### Batch 阶段 3–4：OpenMVS 深度过滤和融合
 
-[`11_convert_dvp_to_openmvs_dmap.py`](../data_preprocess/steps/11_convert_dvp_to_openmvs_dmap.py)
+[`convert_dvp_to_openmvs_dmap.py`](convert_dvp_to_openmvs_dmap.py)
 把每张 `depths.dmb` 转成 OpenMVS `depthNNNN.dmap`。转换时会：
 
 1. 去掉相机 `09/10` 的上下 padding；
@@ -124,10 +138,20 @@ OpenMVS 随后读取这些 DVP 深度，使用 `--postprocess-dmaps 1` 删除 sp
 
 ## 批次运行方法
 
+机器路径不同时，先加载本目录的环境配置：
+
+```bash
+cp mvs_process/config.example.env /tmp/mvs_process.env
+# 编辑 /tmp/mvs_process.env
+set -a
+source /tmp/mvs_process.env
+set +a
+```
+
 复制批次清单后，每行填写一个已经完成步骤 1–8 的样本目录，以及可选的结果目录：
 
 ```bash
-cp data_preprocess/batch.example.tsv /tmp/dvp_batch.tsv
+cp mvs_process/batch.example.tsv /tmp/dvp_batch.tsv
 ```
 
 清单是制表符分隔的 TSV。`result_root` 留空时，结果直接写在 `sample_root` 下：
@@ -139,9 +163,9 @@ sample_root  result_root
 检查依赖并运行：
 
 ```bash
-bash data_preprocess/run_batch_mvsnet_to_openmvs_ply.sh --check
+bash mvs_process/run_batch_mvsnet_to_openmvs_ply.sh --check
 
-bash data_preprocess/run_batch_mvsnet_to_openmvs_ply.sh \
+bash mvs_process/run_batch_mvsnet_to_openmvs_ply.sh \
   --batch-file /tmp/dvp_batch.tsv \
   --resume
 ```
@@ -149,7 +173,7 @@ bash data_preprocess/run_batch_mvsnet_to_openmvs_ply.sh \
 也可以直接处理一个准备好的样本：
 
 ```bash
-bash data_preprocess/run_batch_mvsnet_to_openmvs_ply.sh \
+bash mvs_process/run_batch_mvsnet_to_openmvs_ply.sh \
   --sample-root /mnt/nuplan/l3data-reconstruction-bingxing/preprocess_runs/clip_M18-2_07_20251202110510_DF_f5_105_left \
   --result-root /mnt/nuplan/l3data-reconstruction-bingxing/dvp_openmvs_results/clip_M18-2_07_20251202110510_DF_f5_105_left \
   --resume

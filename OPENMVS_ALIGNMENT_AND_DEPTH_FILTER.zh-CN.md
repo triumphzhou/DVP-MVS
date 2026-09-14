@@ -8,8 +8,8 @@
 | --- | --- |
 | [run_dvp.sh](moge3_dvp_sample_00001_clean7/run_dvp.sh) | 单卡运行入口；设置 `DVP_FUSION_MIN_CONSISTENT=2`、`DVP_DEPTH_SPECKLE_SIZE=7`，运行 `./build/APD`。 |
 | [run_dvp_parallel.sh](moge3_dvp_sample_00001_clean7/run_dvp_parallel.sh) | 7 卡并行入口，使用相同融合和散斑参数。运行前会删除当前实验的 `scene/APD` 和 `scene/APD_parallel_barrier`。 |
-| [prepare_clean.py](moge3_dvp_sample_00001_clean7/prepare_clean.py) | 复用 OpenMVS masks；图像保持宽高比并补边到 `960×640`；相机文件中的深度端点经 APD 扩展后对应 `0.5–80 m`。 |
-| [finalize_clean.py](moge3_dvp_sample_00001_clean7/finalize_clean.py) | 使用已验证的 OpenMVS 邻接关系，生成每张参考图包含 20 个邻居的 `scene/pair.txt`。邻接来源为 `neighbors_diverse_pm20_top20.tsv`，包含跨相机及前后 20 帧范围的多样性。 |
+| [prepare_dvp_scene.py](mvs_process/prepare_dvp_scene.py) | 复用 OpenMVS masks；图像保持宽高比并补边到 `960×640`；相机文件中的深度端点经 APD 扩展后对应配置的深度范围。 |
+| [finalize_dvp_scene.py](mvs_process/finalize_dvp_scene.py) | 使用已验证的 OpenMVS 邻接关系，生成每张参考图包含 20 个邻居的 `scene/pair.txt`。邻接来源为 `neighbors_diverse_pm20_top20.tsv`，包含跨相机及前后 20 帧范围的多样性。 |
 
 参数读取及 DVP 自身过滤、融合实现在 [APD.cpp](APD.cpp)：
 
@@ -101,7 +101,7 @@ Random Smooth Bonus = 0.98
 整体流程为：
 
 ```text
-prepare_clean.py + finalize_clean.py
+prepare_dvp_scene.py + finalize_dvp_scene.py
     → DVP 输入、mask、先验及 pair.txt
     → run_dvp.sh 或 run_dvp_parallel.sh
     → scene/APD/<图像ID>/depths.dmb

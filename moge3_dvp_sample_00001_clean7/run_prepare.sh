@@ -24,7 +24,7 @@ mkdir -p "$ROOT"
 pids=()
 for shard in $(seq 0 $((NUM_SHARDS - 1))); do
   CUDA_VISIBLE_DEVICES="$shard" "$PYTHON" -u \
-    "$REPO/moge3_dvp_sample_00001_clean7/prepare_clean.py" \
+    "$REPO/mvs_process/prepare_dvp_scene.py" \
     --shard "$shard" "${prepare_args[@]}" >"$ROOT/moge-shard-$shard.log" 2>&1 &
   pids+=("$!")
 done
@@ -40,5 +40,5 @@ if [[ "$status" -ne 0 ]]; then
   exit "$status"
 fi
 
-"$PYTHON" -u "$REPO/moge3_dvp_sample_00001_clean7/finalize_clean.py" \
+"$PYTHON" -u "$REPO/mvs_process/finalize_dvp_scene.py" \
   "${finalize_args[@]}" | tee "$ROOT/finalize.log"
