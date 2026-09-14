@@ -286,6 +286,13 @@ void ProcessProblem(const Problem& problem) {
 	cv::Mat depth = cv::Mat(height, width, CV_32FC1);
 	cv::Mat normal = cv::Mat(height, width, CV_32FC3);
 	cv::Mat pixel_states = APD.GetPixelStates();
+	cv::Mat valid_mask(height, width, CV_8UC1, cv::Scalar(255));
+	path block_path = problem.dense_folder / path("blocks") / path("mask_" + std::to_string(problem.ref_image_id) + ".jpg");
+	if (exists(block_path)) {
+		cv::Mat block = cv::imread(block_path.string(), cv::IMREAD_GRAYSCALE);
+		if (block.empty()) throw std::runtime_error("Cannot read dense matching mask: " + block_path.string());
+		cv::resize(block, valid_mask, cv::Size(width, height), 0, 0, cv::INTER_NEAREST);
+	}
 
 	//yzl
 	unsigned int views;
@@ -301,14 +308,17 @@ void ProcessProblem(const Problem& problem) {
 	for (int r = 0; r < height; ++r) {
 		for (int c = 0; c < width; ++c) {
 			float4 plane_hypothesis = APD.GetPlaneHypothesis(r, c);
-			depth.at<float>(r, c) = plane_hypothesis.w;
-			if (depth.at<float>(r, c) < APD.GetDepthMin() || depth.at<float>(r, c) > APD.GetDepthMax()) {
+			const bool keep = valid_mask.at<uchar>(r, c) >= 128;
+			depth.at<float>(r, c) = keep ? plane_hypothesis.w : 0.0f;
+			if (!keep || depth.at<float>(r, c) < APD.GetDepthMin() || depth.at<float>(r, c) > APD.GetDepthMax()) {
 				depth.at<float>(r, c) = 0;
 				pixel_states.at<uchar>(r, c) = UNKNOWN;
 			}
-			normal.at<cv::Vec3f>(r, c) = cv::Vec3f(plane_hypothesis.x, plane_hypothesis.y, plane_hypothesis.z);
+			normal.at<cv::Vec3f>(r, c) = keep
+				? cv::Vec3f(plane_hypothesis.x, plane_hypothesis.y, plane_hypothesis.z)
+				: cv::Vec3f(0.0f, 0.0f, 0.0f);
 
-			views = APD.GetPixelSelectedViews(r, c);
+			views = keep ? APD.GetPixelSelectedViews(r, c) : 0;
 			for (int i = 0; i < problem.src_image_ids.size(); ++i) {
 				if ((views >> i) & 1) {
 					matVector[i].at<cv::Vec3b>(r, c) = cv::Vec3b(255, 255, 255);
@@ -356,6 +366,10 @@ void ProcessProblem(const Problem& problem) {
 
 	for (int y = 0; y < height; y++) {
 		for (int x = 0; x < width; x++) {
+			if (valid_mask.at<uchar>(y, x) < 128) {
+				APD.SetPixelSelectedViews(y, x, 0);
+				continue;
+			}
 			unsigned int temp_selected_views = 0;
 			for (int i = 0; i < problem.src_image_ids.size(); ++i) {
 				if (matVector[i].at<cv::Vec3b>(y, x) == cv::Vec3b(255, 255, 255))
@@ -456,6 +470,7 @@ int main(int argc, char** argv) {
 		std::cerr << "Missing images or inconsistent image sizes\n";
 		return EXIT_FAILURE;
 	}
+	std::cout << "Dense matching mask mode: DVP_DENSE_MASK_V1\n";
 	std::vector<Problem> problems;
 	for (const Problem& problem : all_problems) {
 		if (problem.index % worker_count == worker_index) problems.push_back(problem);

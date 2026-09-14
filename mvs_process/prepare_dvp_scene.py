@@ -210,8 +210,12 @@ def main() -> None:
         depth = np.zeros((HEIGHT, WIDTH), np.float32)
         depth[pad_y : pad_y + content_height, pad_x : pad_x + content_width] = content_depth
 
+        # APD has no standard MVSNet mask input. Black out ignored pixels in its
+        # private image copy; per-iteration depth output is masked again in C++.
+        dvp_content = content.copy()
+        dvp_content[ignored_content] = 0
         padded = np.zeros((HEIGHT, WIDTH, 3), np.uint8)
-        padded[pad_y : pad_y + content_height, pad_x : pad_x + content_width] = content
+        padded[pad_y : pad_y + content_height, pad_x : pad_x + content_width] = dvp_content
         block = np.zeros((HEIGHT, WIDTH), np.uint8)
         block[pad_y : pad_y + content_height, pad_x : pad_x + content_width] = keep_content.astype(np.uint8) * 255
 

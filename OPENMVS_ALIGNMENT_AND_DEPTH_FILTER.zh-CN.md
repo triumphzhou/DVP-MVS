@@ -11,6 +11,10 @@
 | [prepare_dvp_scene.py](mvs_process/prepare_dvp_scene.py) | 复用 OpenMVS masks；图像保持宽高比并补边到 `960×640`；相机文件中的深度端点经 APD 扩展后对应配置的深度范围。 |
 | [finalize_dvp_scene.py](mvs_process/finalize_dvp_scene.py) | 使用已验证的 OpenMVS 邻接关系，生成每张参考图包含 20 个邻居的 `scene/pair.txt`。邻接来源为 `neighbors_diverse_pm20_top20.tsv`，包含跨相机及前后 20 帧范围的多样性。 |
 
+标准 MVSNet 格式没有统一的动态 mask 字段。本项目的 PKL 转换结果额外包含
+`03_converted/dynamic_mask/`；预处理步骤 6 把非零动态区域与天空、车体 mask 合并。组合
+mask 会用于 DVP 输入和逐轮深度清零，也会通过 OpenMVS `--mask-path` 用于最终过滤融合。
+
 参数读取及 DVP 自身过滤、融合实现在 [APD.cpp](APD.cpp)：
 
 - `DVP_FUSION_MIN_CONSISTENT`：最少一致源视图数，默认 2。

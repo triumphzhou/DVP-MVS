@@ -21,8 +21,9 @@ mvs_process/
 └── README.zh-CN.md
 ```
 
-关闭原生融合依赖当前源码中的 `DVP_SKIP_FUSION` 开关。首次使用或更新代码后需要重新
-编译 `build/APD`；批处理预检会拒绝不支持该开关的旧二进制，防止误跑 DVP 融合。
+关闭原生融合依赖当前源码中的 `DVP_SKIP_FUSION` 开关，逐轮 mask 依赖
+`DVP_DENSE_MASK_V1` 实现。首次使用或更新代码后需要重新编译 `build/APD`；批处理预检会
+拒绝不支持这两项功能的旧二进制，防止误跑 DVP 融合或漏掉动态 mask。
 
 ## 从准备好的多视图数据批量运行到点云
 
@@ -60,7 +61,9 @@ MVSNet 格式；batch 阶段 1 会把它和 mask、邻居关系转换为 `09_dvp
 └── blocks/mask_0.jpg               # 有效区域为 255
 ```
 
-标准 MVSNet 的 `images/cams/pair.txt` 还不够用于当前定制版 APD；还需要
+标准 MVSNet 的 `images/cams/pair.txt` 没有统一的动态 mask 字段。当前数据转换器额外生成
+`03_converted/dynamic_mask/<帧_相机>.png`，其中非零像素表示动态目标。预处理步骤 6 将它
+与天空、camera 10 车体 mask 合并成 OpenMVS 的 `255=忽略` mask。当前定制版 APD 还需要
 `metric_prior` 和 `blocks`。它们由
 [`prepare_dvp_scene.py`](prepare_dvp_scene.py) 和
 [`finalize_dvp_scene.py`](finalize_dvp_scene.py) 生成。
@@ -74,7 +77,7 @@ MVSNet 格式；batch 阶段 1 会把它和 mask、邻居关系转换为 `09_dvp
 | `03_converted/ego_pose` | `W2C = inverse(C2W)` | `scene/cams` 中的外参 |
 | RGB + MoGeV3 | 预测稠密深度 | 相对/单目深度形状 |
 | `03_converted/lidar_depth` | `median(LiDAR/MoGe)` 求每张图米制尺度 | `metric_prior/*.dmb` |
-| OpenMVS 天空和车体 mask | 去掉天空、车体、padding 和模型无效像素 | `blocks/mask_*.jpg` |
+| OpenMVS 天空、动态目标和车体组合 mask | 去掉这些区域、padding 和模型无效像素 | `blocks/mask_*.jpg` |
 | OpenMVS/COLMAP 邻居 TSV | 映射成连续 DVP ID，每张图选 20 个源视图 | `pair.txt` |
 
 相机 `00–04` 的 `1920×1280` 图像变成 `960×640`。相机 `09/10` 的
@@ -93,7 +96,9 @@ LiDAR 点，不再排除 80 m 以外的点。最终先验和 APD 搜索范围仍
 ### Batch 阶段 2：APD 深度估计
 
 APD 从 `scene/pair.txt` 开始逐张读取参考图、20 张源图、相机、mask、米制深度和法线
-先验。`960×640` 输入使用 `480×320` 和 `960×640` 两层金字塔进行 PatchMatch。
+先验。`960×640` 输入使用 `480×320` 和 `960×640` 两层金字塔进行 PatchMatch。组合 mask
+在 DVP 输入图像中置黑，并在每次 PatchMatch 迭代写出结果前将对应深度、法线、状态和
+已选视图清零，因此动态区域不会进入下一轮几何一致性，也不会进入最终 DMAP。
 每个视角输出：
 
 ```text
@@ -112,7 +117,7 @@ APD 从 `scene/pair.txt` 开始逐张读取参考图、20 张源图、相机、m
 把每张 `depths.dmb` 转成 OpenMVS `depthNNNN.dmap`。转换时会：
 
 1. 去掉相机 `09/10` 的上下 padding；
-2. 应用相同的天空/车体 mask 和 `0.1–100 m` 范围；
+2. 应用相同的天空/动态目标/车体组合 mask 和 `0.1–100 m` 范围；
 3. 从当前 `scene.mvs` 和 COLMAP 模型读取准确的 OpenMVS image ID；
 4. 写入对应的 20 个邻居 ID、缩放后的内参、W2C 旋转和相机中心；
 5. 从 DVP 深度重新计算 OpenMVS 使用的相机坐标法线。

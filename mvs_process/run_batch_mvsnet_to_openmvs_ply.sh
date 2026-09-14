@@ -111,6 +111,7 @@ IFS=',' read -r -a GPU_ARRAY <<<"$GPU_IDS"
 for gpu in "${GPU_ARRAY[@]}"; do [[ "$gpu" =~ ^[0-9]+$ ]] || die "invalid GPU ID: $gpu"; done
 
 preflight() {
+  if [[ "$DMAP_PYTHON" == */* ]]; then require_exe "$DMAP_PYTHON"; else require_command "$DMAP_PYTHON"; fi
   if (( FROM_STAGE <= 1 && TO_STAGE >= 1 )); then
     require_file "$DVP_PREPARE"; require_file "$DVP_FINALIZE"
     require_exe "$MOGE_PYTHON"; require_file "$MOGE_WEIGHTS"
@@ -120,10 +121,10 @@ preflight() {
   if (( FROM_STAGE <= 2 && TO_STAGE >= 2 )); then
     require_exe "$DVP_BIN"
     grep -aq 'DVP_SKIP_FUSION' "$DVP_BIN" || die "DVP executable lacks native-fusion skip support; rebuild build/APD from the current source"
+    grep -aq 'DVP_DENSE_MASK_V1' "$DVP_BIN" || die "DVP executable lacks dense matching mask support; rebuild build/APD from the current source"
   fi
   if (( FROM_STAGE <= 4 && TO_STAGE >= 3 )); then
     require_file "$DMAP_CONVERTER"
-    if [[ "$DMAP_PYTHON" == */* ]]; then require_exe "$DMAP_PYTHON"; else require_command "$DMAP_PYTHON"; fi
     "$DMAP_PYTHON" -c 'import cv2, numpy' || die "DMAP Python lacks cv2/numpy"
   fi
   if (( FROM_STAGE <= 4 && TO_STAGE >= 4 )); then
@@ -259,11 +260,16 @@ process_sample() {
   [[ ${#neighbor_files[@]} -eq 1 ]] || die "$sample_name: expected one top-20 neighbor file, found ${#neighbor_files[@]}"
   local neighbors=${neighbor_files[0]} neighbors_tsv="$sample_root/audit/$(basename "${neighbor_files[0]%.txt}").tsv"
   require_dir "$source"; require_dir "$masks"; require_file "$scene"; require_file "$images_txt"; require_file "$neighbors_tsv"
+  if [[ -d "$source/dynamic_mask" ]]; then
+    require_file "$sample_root/06_masks/dynamic_mask_audit.json"
+    "$DMAP_PYTHON" -c 'import json,sys; r=json.load(open(sys.argv[1])); raise SystemExit(0 if r.get("status") == "PASS" and r.get("image_count") == r.get("dynamic_mask_count") else 1)' \
+      "$sample_root/06_masks/dynamic_mask_audit.json" || die "$sample_name: dynamic masks were not merged into OpenMVS masks; rerun preprocessing step 6"
+  fi
   mkdir -p "$state" "$logs"
 
   local request="$state/dvp_openmvs_request.txt" request_tmp="$state/dvp_openmvs_request.tmp"
   cat >"$request_tmp" <<EOF
-pipeline_version=3
+pipeline_version=4
 source=$sample_root
 depth_min=$DEPTH_MIN
 depth_max=$DEPTH_MAX

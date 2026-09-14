@@ -118,7 +118,8 @@ preflight() {
     01_collision_detection_v4.py 01_scan_original_clip_windows_v4.py \
     02_convert_m18_pkl.py 03_normalize_segment_0based.py \
     04_prepare_openmvs_input.py 05_prepare_image_lists_and_pairs.py \
-    06_prepare_full_sky_masks.py 06_create_empty_masks.py 06_add_camera10_rig_mask.py \
+    06_prepare_full_sky_masks.py 06_create_empty_masks.py 06_merge_dynamic_masks.py \
+    06_add_camera10_rig_mask.py \
     07_camera_params.py 07_create_colmap_template.py 07_build_correct_fixed_model.py \
     07_audit_colmap_database.py 07_validate_fixed_poses.py 08_build_diverse_neighbors.py \
     select_segment.py; do
@@ -289,6 +290,11 @@ run_step_6() {
   else
     run_logged "$LOGS/step06_empty_masks.log" "$PYTHON_BIN" "$STEPS/06_create_empty_masks.py" \
       --images "$OPENMVS_INPUT/images" --output "$MASK_ROOT" --frame-count 101
+  fi
+  if [[ -d "$OPENMVS_INPUT/dynamic_mask" ]]; then
+    run_logged "$LOGS/step06_dynamic_masks.log" "$PYTHON_BIN" "$STEPS/06_merge_dynamic_masks.py" \
+      --images "$OPENMVS_INPUT/images" --dynamic-masks "$OPENMVS_INPUT/dynamic_mask" \
+      --mask-root "$MASK_ROOT"
   fi
   if [[ "$ADD_CAMERA10_RIG_MASK" == 1 ]]; then
     run_logged "$LOGS/step06_camera10_mask.log" "$PYTHON_BIN" "$STEPS/06_add_camera10_rig_mask.py" \

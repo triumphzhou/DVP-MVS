@@ -16,7 +16,7 @@
 | 3 | 绝对帧号数据 | `03_normalize_segment_0based.py` | 帧号为 `000000–000100` 的 `03_converted/` |
 | 4 | `converted` 图像、内外参和位姿 | `04_prepare_openmvs_input.py` | 轻量符号链接视图和 `input_manifest.json` |
 | 5 | 图像与 manifest | `05_prepare_image_lists_and_pairs.py` | 七个相机清单、±20 帧 COLMAP 候选图对 |
-| 6 | 707 张图像 | `06_prepare_full_sky_masks.py`、`06_add_camera10_rig_mask.py` | OpenMVS 天空/车体忽略 mask |
+| 6 | 707 张图像和 `dynamic_mask` | `06_prepare_full_sky_masks.py`、`06_merge_dynamic_masks.py`、`06_add_camera10_rig_mask.py` | OpenMVS 天空/动态目标/车体组合忽略 mask |
 | 7 | 图像、内参、固定 pose、候选图对 | `07_*` 工具和 COLMAP | 固定姿态、不做 BA 的三角化稀疏模型 |
 | 8 | COLMAP 稀疏模型 | `InterfaceCOLMAP`、`08_build_diverse_neighbors.py` | `scene.mvs` 和每张参考图 20 个源视图的邻居文件 |
 
@@ -86,8 +86,13 @@ bash data_preprocess/run_preprocess_1_to_8.sh --check
 - 支持 CUDA SIFT 的 COLMAP；
 - OpenMVS `InterfaceCOLMAP` 及其动态库。
 
-如果暂时不生成天空 mask，可加 `--no-sky-mask`。此时仍会生成全零 OpenMVS mask，
-并默认叠加 camera 10 的固定车体区域。
+如果暂时不生成天空 mask，可加 `--no-sky-mask`。只要转换数据中存在 `dynamic_mask/`，
+步骤 6 仍会把所有非零动态目标像素转换为 OpenMVS 忽略值 `255`，并默认叠加 camera 10
+的固定车体区域。合并统计保存在 `06_masks/dynamic_mask_audit.json`。
+
+早于本改动生成的预处理目录没有动态 mask 合并记录。使用旧目录前，需要删除
+`06_masks/` 和 `.state/step_6.complete`，然后从步骤 6 重新运行；MVS 批处理也会检查该记录，
+避免动态目标未屏蔽时继续计算。
 
 ## 输出
 
@@ -102,7 +107,9 @@ bash data_preprocess/run_preprocess_1_to_8.sh --check
 │   └── input_manifest.json
 ├── 05_pairs/
 │   └── colmap_match_pairs.txt
-├── 06_masks/openmvs_masks/
+├── 06_masks/
+│   ├── openmvs_masks/              # 255=忽略，合并天空、动态目标和车体
+│   └── dynamic_mask_audit.json
 ├── 07_sparse/triangulated_binary/
 ├── 08_openmvs_input/global/
 │   ├── scene.mvs

@@ -250,7 +250,7 @@ def main() -> None:
         "camera_count": len(by_camera),
         "cameras": sorted(by_camera),
         "changes": {
-            "masks": "OpenMVS conservative sky masks for every camera plus camera10 fixed ego-rig mask; applied to priors/DVP depth estimation and passed to OpenMVS fusion",
+            "masks": "combined OpenMVS ignore masks (sky, converted dynamic objects and camera10 ego rig); applied to priors/DVP depth estimation and passed to OpenMVS fusion",
             "pairing": "20 COLMAP-SIFT-verified OpenMVS views per reference, including cross-camera and +/-20-frame diversity",
             "dvp_native_fusion": "disabled by the mvs_process batch with DVP_SKIP_FUSION=1",
             "resize": "aspect-preserving fit into 960x640; camera09/10 are 960x540 with 50-pixel top/bottom padding",
