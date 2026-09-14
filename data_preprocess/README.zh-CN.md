@@ -122,6 +122,74 @@ neighbors   = 08_openmvs_input/global/neighbors_diverse_pm20_top20.txt
 
 该入口在步骤 8 停止，不运行 OpenMVS PatchMatch/融合，也不会生成结果 PLY。
 
+## 批量运行到 OpenMVS 融合点云
+
+[`run_batch_pkl_to_openmvs_ply.sh`](run_batch_pkl_to_openmvs_ply.sh) 将上述八步继续串到
+MoGeV3、DVP-MVS 和 OpenMVS depth filter/fusion。最终的数据流为：
+
+```text
+PKL
+  -> converted
+  -> COLMAP 固定姿态稀疏模型和 OpenMVS scene.mvs
+  -> MoGeV3 米制深度先验
+  -> DVP-MVS PatchMatch 深度
+  -> OpenMVS DMAP
+  -> OpenMVS 深度图去除 speckle + dense-fuse
+  -> openmvs_filtered_fused.ply
+```
+
+复制批次清单后，每行填写一个 101 帧分段：
+
+```bash
+cp data_preprocess/batch.example.tsv /tmp/dvp_batch.tsv
+```
+
+清单是制表符分隔的 TSV：
+
+```text
+clip_name  side  frame_start  frame_end  sample_name
+```
+
+检查依赖并运行：
+
+```bash
+bash data_preprocess/run_batch_pkl_to_openmvs_ply.sh --check
+
+bash data_preprocess/run_batch_pkl_to_openmvs_ply.sh \
+  --batch-file /tmp/dvp_batch.tsv \
+  --output-root /mnt/nuplan/l3data-reconstruction-bingxing/preprocess_runs \
+  --resume
+```
+
+也可以直接处理一个分段：
+
+```bash
+bash data_preprocess/run_batch_pkl_to_openmvs_ply.sh \
+  --clip-name clip_M18-2_07_20251202110510_DF \
+  --side left --frame-start 5 --frame-end 105 \
+  --output-root /mnt/nuplan/l3data-reconstruction-bingxing/preprocess_runs \
+  --resume
+```
+
+批处理默认使用 7 张 GPU，MoGe/LiDAR 尺度标定不设 80 m 上限，DVP 和 OpenMVS
+深度范围都是 `0.1–100 m`。可以分别用 `--gpu-ids`、`--bounded-lidar`、
+`--depth-min` 和 `--depth-max` 修改。`--from-stage 9 --resume` 可以复用已有的
+步骤 1–8，从 MoGeV3 开始继续。
+
+步骤 11 根据当前 `scene.mvs`、COLMAP image ID 和邻居文件生成 DMAP，避免借用其他样本
+的 OpenMVS 深度模板。步骤 12 使用 `--postprocess-dmaps 1` 去除深度 speckle，再以
+`--fusion-filter 2`、两视角最低支持执行 dense-fuse；输入深度是 DVP-MVS 的输出。
+
+每个样本的两个点云位于：
+
+```text
+<output-root>/<sample>/09_dvp/scene/APD/APD.ply
+<output-root>/<sample>/10_openmvs_fusion/openmvs_filtered_fused.ply
+```
+
+中间深度和点云属于运行结果，默认输出根目录位于仓库外；仓库内默认的
+`data_preprocess/runs/` 也已被 Git 忽略。
+
 ## 代码来源与改动
 
 步骤 1–4 来自已经核对过的原始脚本；步骤 5–8来自旧版
