@@ -138,6 +138,104 @@ PKL
   -> openmvs_filtered_fused.ply
 ```
 
+## 从 MVSNet 风格数据到 DVP-MVS 点云
+
+这里需要区分两个目录。`03_converted/` 是归一化后的传感器数据，还不是 APD 直接读取的
+MVSNet 格式；步骤 9 会把它和 mask、邻居关系转换为 `09_dvp/scene/`。后者才是 DVP-MVS
+实际读取的 MVSNet 风格场景：
+
+```text
+09_dvp/scene/
+├── images/                         # 00000000.jpg 等连续八位 ID
+├── cams/                           # 00000000_cam.txt：W2C、K、深度范围
+├── pair.txt                        # 每张参考图及其 20 张源图
+├── metric_prior/
+│   ├── 00000000.dmb                # MoGeV3 米制深度先验
+│   └── 00000000_normal.dmb         # 世界坐标法线先验
+└── blocks/mask_0.jpg               # 有效区域为 255
+```
+
+标准 MVSNet 的 `images/cams/pair.txt` 还不够用于当前定制版 APD；还需要
+`metric_prior` 和 `blocks`。它们由
+[`prepare_clean.py`](../moge3_dvp_sample_00001_clean7/prepare_clean.py) 和
+[`finalize_clean.py`](../moge3_dvp_sample_00001_clean7/finalize_clean.py) 生成。
+
+### 步骤 9：生成 DVP-MVS 输入
+
+| 读入数据 | 变换 | DVP 输出 |
+|---|---|---|
+| `03_converted/images` | 保持宽高比缩放并放入 `960×640` 画布 | `scene/images` |
+| `03_converted/intrinsics` | 缩放 `fx/fy/cx/cy`，主点再加 padding | `scene/cams` 中的 `K` |
+| `03_converted/ego_pose` | `W2C = inverse(C2W)` | `scene/cams` 中的外参 |
+| RGB + MoGeV3 | 预测稠密深度 | 相对/单目深度形状 |
+| `03_converted/lidar_depth` | `median(LiDAR/MoGe)` 求每张图米制尺度 | `metric_prior/*.dmb` |
+| OpenMVS 天空和车体 mask | 去掉天空、车体、padding 和模型无效像素 | `blocks/mask_*.jpg` |
+| OpenMVS/COLMAP 邻居 TSV | 映射成连续 DVP ID，每张图选 20 个源视图 | `pair.txt` |
+
+相机 `00–04` 的 `1920×1280` 图像变成 `960×640`。相机 `09/10` 的
+`1920×1080` 图像先变成 `960×540`，再在上下各补 50 像素。MoGeV3 在未补边的有效内容
+上推理，稀疏 LiDAR 用下面的中位数比例把预测深度变成米：
+
+```text
+metric_depth = moge_depth × median(lidar_depth / moge_depth)
+```
+
+默认批处理使用 `--unbounded-lidar-calibration`，即尺度标定采用所有大于 2 m 的有效
+LiDAR 点，不再排除 80 m 以外的点。最终先验和 APD 搜索范围仍按 `0.1–100 m` 过滤。
+随后按相机对尺度做中位数/MAD 稳健裁剪，删除小于 20 像素的孤立深度块，并由深度
+反投影计算世界坐标法线。
+
+### 步骤 10：APD 深度估计和 DVP 融合
+
+APD 从 `scene/pair.txt` 开始逐张读取参考图、20 张源图、相机、mask、米制深度和法线
+先验。`960×640` 输入使用 `480×320` 和 `960×640` 两层金字塔进行 PatchMatch。
+每个视角输出：
+
+```text
+09_dvp/scene/APD/<八位图像ID>/depths.dmb
+09_dvp/scene/APD/<八位图像ID>/APD_normals.dmb
+09_dvp/scene/APD/<八位图像ID>/weak.bin
+09_dvp/scene/APD/<八位图像ID>/selected_views.bin
+```
+
+APD 随后执行 DVP 自己的多视角几何一致性融合，生成：
+
+```text
+09_dvp/scene/APD/APD.ply
+```
+
+该点云是 **DVP-MVS 融合结果**，没有经过 OpenMVS depth filter。
+
+### 步骤 11–12：OpenMVS 深度过滤和融合
+
+[`11_convert_dvp_to_openmvs_dmap.py`](steps/11_convert_dvp_to_openmvs_dmap.py)
+把每张 `depths.dmb` 转成 OpenMVS `depthNNNN.dmap`。转换时会：
+
+1. 去掉相机 `09/10` 的上下 padding；
+2. 应用相同的天空/车体 mask 和 `0.1–100 m` 范围；
+3. 从当前 `scene.mvs` 和 COLMAP 模型读取准确的 OpenMVS image ID；
+4. 写入对应的 20 个邻居 ID、缩放后的内参、W2C 旋转和相机中心；
+5. 从 DVP 深度重新计算 OpenMVS 使用的相机坐标法线。
+
+OpenMVS 随后读取这些 DVP 深度，使用 `--postprocess-dmaps 1` 删除 speckle，再以
+`--fusion-filter 2` 执行 dense-fuse。融合要求至少两个视图支持，使用 1% 深度差阈值和
+2.5 像素重投影阈值。脚本会先生成并验证全部 707 个 DVP DMAP，OpenMVS 直接复用这些
+已有深度；`--geometric-iters 0` 不再追加 OpenMVS 几何 PatchMatch 迭代。因此这里使用的
+是 **DVP 估计的深度 + OpenMVS 过滤和融合策略**。最终生成：
+
+```text
+10_openmvs_fusion/openmvs_filtered_fused.ply
+```
+
+两个 PLY 的区别如下：
+
+| 点云 | 深度来源 | 深度过滤与融合程序 |
+|---|---|---|
+| `09_dvp/scene/APD/APD.ply` | DVP-MVS `depths.dmb` | DVP-MVS `RunFusion` |
+| `10_openmvs_fusion/openmvs_filtered_fused.ply` | 同一批 DVP-MVS 深度转成 DMAP | OpenMVS speckle filter + dense-fuse |
+
+## 批次运行方法
+
 复制批次清单后，每行填写一个 101 帧分段：
 
 ```bash
