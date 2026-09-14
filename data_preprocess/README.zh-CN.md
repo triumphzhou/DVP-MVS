@@ -122,15 +122,18 @@ neighbors   = 08_openmvs_input/global/neighbors_diverse_pm20_top20.txt
 
 该入口在步骤 8 停止，不运行 OpenMVS PatchMatch/融合，也不会生成结果 PLY。
 
-## 批量运行到 OpenMVS 融合点云
+## 从准备好的多视图数据批量运行到点云
 
-[`run_batch_pkl_to_openmvs_ply.sh`](run_batch_pkl_to_openmvs_ply.sh) 将上述八步继续串到
-MoGeV3、DVP-MVS 和 OpenMVS depth filter/fusion。最终的数据流为：
+[`run_batch_mvsnet_to_openmvs_ply.sh`](run_batch_mvsnet_to_openmvs_ply.sh) 不处理 PKL，
+也不运行 COLMAP。它只读取 `run_preprocess_1_to_8.sh` 已经生成的多视图样本目录，执行
+MoGeV3、DVP-MVS 和 OpenMVS depth filter/fusion：
 
 ```text
-PKL
-  -> converted
-  -> COLMAP 固定姿态稀疏模型和 OpenMVS scene.mvs
+准备好的 sample-root
+  ├── 03_converted
+  ├── 06_masks
+  ├── 07_sparse
+  └── 08_openmvs_input/scene.mvs
   -> MoGeV3 米制深度先验
   -> DVP-MVS PatchMatch 深度
   -> OpenMVS DMAP
@@ -141,7 +144,7 @@ PKL
 ## 从 MVSNet 风格数据到 DVP-MVS 点云
 
 这里需要区分两个目录。`03_converted/` 是归一化后的传感器数据，还不是 APD 直接读取的
-MVSNet 格式；步骤 9 会把它和 mask、邻居关系转换为 `09_dvp/scene/`。后者才是 DVP-MVS
+MVSNet 格式；batch 阶段 1 会把它和 mask、邻居关系转换为 `09_dvp/scene/`。后者才是 DVP-MVS
 实际读取的 MVSNet 风格场景：
 
 ```text
@@ -160,7 +163,7 @@ MVSNet 格式；步骤 9 会把它和 mask、邻居关系转换为 `09_dvp/scene
 [`prepare_clean.py`](../moge3_dvp_sample_00001_clean7/prepare_clean.py) 和
 [`finalize_clean.py`](../moge3_dvp_sample_00001_clean7/finalize_clean.py) 生成。
 
-### 步骤 9：生成 DVP-MVS 输入
+### Batch 阶段 1：生成 DVP-MVS 输入
 
 | 读入数据 | 变换 | DVP 输出 |
 |---|---|---|
@@ -185,7 +188,7 @@ LiDAR 点，不再排除 80 m 以外的点。最终先验和 APD 搜索范围仍
 随后按相机对尺度做中位数/MAD 稳健裁剪，删除小于 20 像素的孤立深度块，并由深度
 反投影计算世界坐标法线。
 
-### 步骤 10：APD 深度估计和 DVP 融合
+### Batch 阶段 2：APD 深度估计和 DVP 融合
 
 APD 从 `scene/pair.txt` 开始逐张读取参考图、20 张源图、相机、mask、米制深度和法线
 先验。`960×640` 输入使用 `480×320` 和 `960×640` 两层金字塔进行 PatchMatch。
@@ -206,7 +209,7 @@ APD 随后执行 DVP 自己的多视角几何一致性融合，生成：
 
 该点云是 **DVP-MVS 融合结果**，没有经过 OpenMVS depth filter。
 
-### 步骤 11–12：OpenMVS 深度过滤和融合
+### Batch 阶段 3–4：OpenMVS 深度过滤和融合
 
 [`11_convert_dvp_to_openmvs_dmap.py`](steps/11_convert_dvp_to_openmvs_dmap.py)
 把每张 `depths.dmb` 转成 OpenMVS `depthNNNN.dmap`。转换时会：
@@ -236,57 +239,54 @@ OpenMVS 随后读取这些 DVP 深度，使用 `--postprocess-dmaps 1` 删除 sp
 
 ## 批次运行方法
 
-复制批次清单后，每行填写一个 101 帧分段：
+复制批次清单后，每行填写一个已经完成步骤 1–8 的样本目录，以及可选的结果目录：
 
 ```bash
 cp data_preprocess/batch.example.tsv /tmp/dvp_batch.tsv
 ```
 
-清单是制表符分隔的 TSV：
+清单是制表符分隔的 TSV。`result_root` 留空时，结果直接写在 `sample_root` 下：
 
 ```text
-clip_name  side  frame_start  frame_end  sample_name
+sample_root  result_root
 ```
 
 检查依赖并运行：
 
 ```bash
-bash data_preprocess/run_batch_pkl_to_openmvs_ply.sh --check
+bash data_preprocess/run_batch_mvsnet_to_openmvs_ply.sh --check
 
-bash data_preprocess/run_batch_pkl_to_openmvs_ply.sh \
+bash data_preprocess/run_batch_mvsnet_to_openmvs_ply.sh \
   --batch-file /tmp/dvp_batch.tsv \
-  --output-root /mnt/nuplan/l3data-reconstruction-bingxing/preprocess_runs \
   --resume
 ```
 
-也可以直接处理一个分段：
+也可以直接处理一个准备好的样本：
 
 ```bash
-bash data_preprocess/run_batch_pkl_to_openmvs_ply.sh \
-  --clip-name clip_M18-2_07_20251202110510_DF \
-  --side left --frame-start 5 --frame-end 105 \
-  --output-root /mnt/nuplan/l3data-reconstruction-bingxing/preprocess_runs \
+bash data_preprocess/run_batch_mvsnet_to_openmvs_ply.sh \
+  --sample-root /mnt/nuplan/l3data-reconstruction-bingxing/preprocess_runs/clip_M18-2_07_20251202110510_DF_f5_105_left \
+  --result-root /mnt/nuplan/l3data-reconstruction-bingxing/dvp_openmvs_results/clip_M18-2_07_20251202110510_DF_f5_105_left \
   --resume
 ```
 
 批处理默认使用 7 张 GPU，MoGe/LiDAR 尺度标定不设 80 m 上限，DVP 和 OpenMVS
 深度范围都是 `0.1–100 m`。可以分别用 `--gpu-ids`、`--bounded-lidar`、
-`--depth-min` 和 `--depth-max` 修改。`--from-stage 9 --resume` 可以复用已有的
-步骤 1–8，从 MoGeV3 开始继续。
+`--depth-min` 和 `--depth-max` 修改。脚本内部只有四个阶段；可以用
+`--from-stage 2 --resume` 跳过已经完成的 MoGe/DVP 场景准备。
 
-步骤 11 根据当前 `scene.mvs`、COLMAP image ID 和邻居文件生成 DMAP，避免借用其他样本
-的 OpenMVS 深度模板。步骤 12 使用 `--postprocess-dmaps 1` 去除深度 speckle，再以
+Batch 阶段 3 根据当前 `scene.mvs`、COLMAP image ID 和邻居文件生成 DMAP，避免借用其他样本
+的 OpenMVS 深度模板。阶段 4 使用 `--postprocess-dmaps 1` 去除深度 speckle，再以
 `--fusion-filter 2`、两视角最低支持执行 dense-fuse；输入深度是 DVP-MVS 的输出。
 
-每个样本的两个点云位于：
+结果目录中的两个点云位于：
 
 ```text
-<output-root>/<sample>/09_dvp/scene/APD/APD.ply
-<output-root>/<sample>/10_openmvs_fusion/openmvs_filtered_fused.ply
+<result-root>/09_dvp/scene/APD/APD.ply
+<result-root>/10_openmvs_fusion/openmvs_filtered_fused.ply
 ```
 
-中间深度和点云属于运行结果，默认输出根目录位于仓库外；仓库内默认的
-`data_preprocess/runs/` 也已被 Git 忽略。
+中间深度和点云属于运行结果；仓库内的 `data_preprocess/runs/` 已被 Git 忽略。
 
 ## 代码来源与改动
 

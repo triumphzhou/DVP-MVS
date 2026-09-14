@@ -1,2 +1,2 @@
-clip_name	side	frame_start	frame_end	sample_name
-clip_M18-2_07_20251202110510_DF	left	5	105	clip_M18-2_07_20251202110510_DF_f5_105_left
+sample_root	result_root
+/mnt/nuplan/l3data-reconstruction-bingxing/preprocess_runs/clip_M18-2_07_20251202110510_DF_f5_105_left	/mnt/nuplan/l3data-reconstruction-bingxing/dvp_openmvs_results/clip_M18-2_07_20251202110510_DF_f5_105_left
